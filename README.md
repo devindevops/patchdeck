@@ -35,6 +35,7 @@ It's **agentless**: nothing to install on your hosts, no daemon phoning home. Pa
 <summary align="center"><strong>More screenshots — host detail, settings, schedules, activity, light &amp; mobile</strong></summary>
 <br>
 <p align="center"><em>Dashboard — light</em><br><img src="docs/screenshots/dashboard-light-desktop.png" alt="Dashboard (light)" width="820" /></p>
+<p align="center"><em>Select mode — pick cards, then act on just those (with a confirm)</em><br><img src="docs/screenshots/dashboard-select-dark-desktop.png" alt="Selecting hosts" width="820" /></p>
 <p align="center"><em>Host detail — packages, reboot/restart, per-host settings</em><br><img src="docs/screenshots/host-detail-dark-desktop.png" alt="Host detail" width="820" /></p>
 <p align="center"><em>Settings — notifications, SSO, tokens, 2FA</em><br><img src="docs/screenshots/settings-dark-desktop.png" alt="Settings" width="820" /></p>
 <p align="center"><em>Schedules — cron scan/apply per host, tag, or fleet</em><br><img src="docs/screenshots/schedules-dark-desktop.png" alt="Schedules" width="820" /></p>
