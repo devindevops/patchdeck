@@ -66,7 +66,7 @@ type Line struct {
 
 // Event is what the dashboard follows: a host's state changed, or it printed a line.
 type Event struct {
-	Type   string // "state" | "line"
+	Type   string // "state" | "line" | "task" (a task finished)
 	HostID string
 	State  string // state: queued | running | idle
 	Line   Line   // line
@@ -126,6 +126,9 @@ type Config struct {
 	// Resumable kinds pick a running host back up after a restart, if the step had recorded a ref
 	// (Run.SetRef) — proof the work reached the host. The resumed step sees Run.Ref.
 	Resumable map[string]bool
+	// OnFinish runs once a task's last host is done (hosts = how many it covered), e.g. to send
+	// the task's one notification.
+	OnFinish func(taskID string, hosts int)
 }
 
 // Manager runs tasks and tracks which hosts are busy.

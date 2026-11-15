@@ -159,6 +159,7 @@ type Job struct {
 	HostID    string   `json:"host_id,omitempty"`    // legacy single-host (kept for compat)
 	HostIDs   []string `json:"host_ids,omitempty"`   // multi-host selection
 	TagFilter string   `json:"tag_filter,omitempty"` // run on all hosts with this tag
+	AllHosts  bool     `json:"all_hosts,omitempty"`  // run on the whole fleet, resolved at every run
 	HostName  string   `json:"host_name,omitempty"`
 	Name      string   `json:"name"`
 	CronExpr  string   `json:"cron_expr"`

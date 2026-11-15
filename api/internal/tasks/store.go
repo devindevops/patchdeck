@@ -54,6 +54,17 @@ func (m *Manager) finishTask(taskID string) {
 	if _, err := m.db.Exec(`UPDATE tasks SET status=?, finished_at=? WHERE id=?`, status, time.Now().UTC(), taskID); err != nil {
 		log.Printf("tasks: finish %s: %v", taskID, err)
 	}
+	if m.cfg.OnFinish != nil {
+		m.cfg.OnFinish(taskID, m.taskSize(taskID))
+	}
+	m.publish(Event{Type: "task"}) // pages refresh their status line (the task is no longer running)
+}
+
+// taskSize is how many hosts a task covers in all (a resumed run covers fewer of them).
+func (m *Manager) taskSize(taskID string) int {
+	var n int
+	_ = m.db.QueryRow(`SELECT count(*) FROM task_hosts WHERE task_id=?`, taskID).Scan(&n)
+	return n
 }
 
 func (m *Manager) prune(now time.Time) {
@@ -127,12 +138,65 @@ func (m *Manager) Recover() {
 		}
 		m.mu.Unlock()
 		log.Printf("tasks: resuming %d host(s) of %s task %s after restart", len(hosts), ps[0].kind, taskID)
-		go m.run(taskID, ps[0].kind, hosts, len(hosts), refs)
+		// Run.Hosts = the whole task's size, so a resumed bulk task still notifies as one.
+		go m.run(taskID, ps[0].kind, hosts, m.taskSize(taskID), refs)
 	}
 	// A resumed task may also hold interrupted hosts; finishTask marks it interrupted when it ends.
 	if n := len(all); n > 0 {
 		log.Printf("tasks: recovered %d unfinished host step(s) (%d task(s) resuming)", n, len(resume))
 	}
+}
+
+// Progress is a running multi-host task, for the dashboard's status line.
+type Progress struct {
+	ID, Kind                                     string
+	Total, Done, Failed, Running, Queued, NotRun int
+}
+
+// Active lists the running tasks that cover more than one host, oldest first.
+func (m *Manager) Active() []Progress {
+	rows, err := m.db.Query(`SELECT t.id, t.kind, th.status, count(*) FROM tasks t JOIN task_hosts th ON th.task_id = t.id
+		WHERE t.status = ? GROUP BY t.id, th.status ORDER BY t.created_at`, TaskRunning)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []Progress
+	idx := map[string]int{}
+	for rows.Next() {
+		var id, kind, st string
+		var n int
+		if rows.Scan(&id, &kind, &st, &n) != nil {
+			continue
+		}
+		i, ok := idx[id]
+		if !ok {
+			out = append(out, Progress{ID: id, Kind: kind})
+			i = len(out) - 1
+			idx[id] = i
+		}
+		p := &out[i]
+		p.Total += n
+		switch st {
+		case StOK, StSkipped:
+			p.Done += n
+		case StRunning:
+			p.Running += n
+		case StQueued:
+			p.Queued += n
+		case StInterrupted, StResumed:
+			p.NotRun += n // cut off by a restart: resumable, not failed
+		default:
+			p.Failed += n
+		}
+	}
+	multi := out[:0]
+	for _, p := range out {
+		if p.Total > 1 {
+			multi = append(multi, p)
+		}
+	}
+	return multi
 }
 
 // Summary describes a finished task for the dashboard's "interrupted" banner.

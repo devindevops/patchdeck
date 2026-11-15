@@ -77,6 +77,7 @@
     </div>
   </div>
   <div id="bulkmsg"></div>
+  {{template "taskstatus" (dict "Lines" .TaskLines)}}
   {{range .Banners}}{{template "taskbanner" .}}{{end}}
 
   <div class="filters">

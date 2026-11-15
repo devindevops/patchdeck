@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"patchdeck/api/internal/auth"
 	"patchdeck/api/internal/db"
 	"patchdeck/api/internal/models"
+	"patchdeck/api/internal/notify"
 	"patchdeck/api/internal/sshx"
 	"patchdeck/api/internal/tasks"
 )
@@ -47,6 +49,51 @@ func (a *app) newTaskManager() *tasks.Manager {
 		// An apply keeps running detached on the host and a reboot's watch only needs the host back:
 		// both are picked up again after a Patchdeck restart. Scan and restart are just reported.
 		Resumable: map[string]bool{tasks.KindApply: true, tasks.KindReboot: true},
+		OnFinish:  a.sendTaskDigest,
+	})
+}
+
+// addTaskDigest adds one event to a multi-host task's own digest (see notifyHost).
+func (a *app) addTaskDigest(taskID string, add func(*notify.Digest)) {
+	a.taskDigestMu.Lock()
+	defer a.taskDigestMu.Unlock()
+	if a.taskDigests == nil {
+		a.taskDigests = map[string]*notify.Digest{}
+	}
+	d := a.taskDigests[taskID]
+	if d == nil {
+		d = &notify.Digest{}
+		a.taskDigests[taskID] = d
+	}
+	add(d)
+}
+
+// sendTaskDigest sends a multi-host task's ONE notification once its last host is done — however
+// long the run took (v2.12.0: no more mid-run messages from the 5-minute coalescer cap). Nothing
+// notable (e.g. a Scan all that found nothing new) = nothing sent. ("Send the scheduled digest
+// every run" covers scheduled runs only.)
+func (a *app) sendTaskDigest(taskID string, hosts int) {
+	a.taskDigestMu.Lock()
+	d := a.taskDigests[taskID]
+	delete(a.taskDigests, taskID)
+	a.taskDigestMu.Unlock()
+	if d == nil || hosts < 2 || !d.Notable() {
+		return
+	}
+	if err := a.notifier.SendDigest(a.currentAppriseURL(), *d); err != nil {
+		log.Printf("notifications: task digest send failed: %v", err)
+	}
+}
+
+// noteActionFailure puts a failed restart or reboot into a multi-host task's digest (single-host
+// actions stay quiet, as before).
+func (a *app) noteActionFailure(r *tasks.Run, host models.Host, phase, reason string) {
+	if r.Hosts < 2 {
+		return
+	}
+	// Gated like an apply failure (the "Apply failed" switch, global + per host).
+	a.notifyHost(r, host.ID, "auto_apply_failure", "", func(d *notify.Digest) {
+		d.Failed = append(d.Failed, notify.FailedHost{Name: host.Name, Phase: phase, Err: reason})
 	})
 }
 
@@ -107,14 +154,14 @@ func (a *app) stepScan(ctx context.Context, r *tasks.Run) tasks.Result {
 	prev, _, _ := db.GetScanSnapshot(a.db, host.ID) // before the upsert, for new-updates detection
 	res, err := a.sshClient.ScanHostStreaming(ctx, host, a.secrets, func(l string) { r.Line("", l) })
 	if err != nil {
-		a.notifyScanFailure(host, fmt.Sprintf("Patchdeck: scan FAILED on %s (%v)", host.Name, err), err.Error())
+		a.notifyScanFailure(r, host, fmt.Sprintf("Patchdeck: scan FAILED on %s (%v)", host.Name, err), err.Error())
 		_ = db.RecordActivity(a.db, host.ID, host.Name, "scan_fail", fmt.Sprintf("Scan failed: %v", err))
 		r.Line("err", "Scan failed: "+hostErrText(err))
 		return failed(hostErrText(err))
 	}
 	_ = db.UpsertScanResult(a.db, host.ID, res)
 	_ = db.RecordActivity(a.db, host.ID, host.Name, "scan_ok", fmt.Sprintf("Scan completed: %d packages available", len(res.Packages)))
-	a.notifyIfNewUpdates(host, prev.Packages, res)
+	a.notifyIfNewUpdates(r, host, prev.Packages, res)
 	msg := fmt.Sprintf("Scan complete — %d update(s) available.", len(res.Packages))
 	r.Line("ok", msg)
 	return tasks.Result{Status: tasks.StOK, Summary: msg}
@@ -152,13 +199,13 @@ func (a *app) stepApply(ctx context.Context, r *tasks.Run) tasks.Result {
 			r.Line("err", "Apply failed: "+hostErrText(err))
 		}
 		if r.Hosts > 1 {
-			a.notifyApplyFailure(host, err)
+			a.notifyApplyFailure(r, host, err)
 		}
 		return failed(hostErrText(err))
 	}
 	_ = db.RecordActivity(a.db, host.ID, host.Name, "apply_ok", fmt.Sprintf("Applied updates: %d packages changed", res.ChangedPackages))
 	if r.Hosts > 1 {
-		a.notifyApplied(host, res)
+		a.notifyApplied(r, host, res)
 	}
 	msg := fmt.Sprintf("Applied — %d package(s) changed.", res.ChangedPackages)
 	r.Line("ok", msg)
@@ -189,6 +236,7 @@ func (a *app) stepRestart(ctx context.Context, r *tasks.Run) tasks.Result {
 	if errors.As(err, &hkErr) {
 		_ = db.RecordActivity(a.db, host.ID, host.Name, "restart_fail", fmt.Sprintf("Smart restart failed: %s", hkErr.Message))
 		r.Line("err", "Restart failed: "+hkErr.Message)
+		a.noteActionFailure(r, host, "restart", hkErr.Message)
 		return failed(hkErr.Message)
 	}
 	marked := 0
@@ -221,6 +269,7 @@ func (a *app) stepRestart(ctx context.Context, r *tasks.Run) tasks.Result {
 	time.Sleep(restartSettle)
 	a.rescan(ctx, host, r)
 	if len(res.Failed) > 0 {
+		a.noteActionFailure(r, host, "restart", strings.Join(res.Failed, ", ")+" could not be restarted")
 		return failed(msg)
 	}
 	return tasks.Result{Status: tasks.StOK, Summary: msg}
@@ -244,6 +293,7 @@ func (a *app) stepReboot(ctx context.Context, r *tasks.Run) tasks.Result {
 		if err := a.sshClient.Power(host, a.secrets, "reboot"); err != nil {
 			_ = db.RecordActivity(a.db, host.ID, host.Name, "reboot_fail", fmt.Sprintf("Reboot failed: %v", err))
 			r.Line("err", "Reboot failed: "+hostErrText(err))
+			a.noteActionFailure(r, host, "reboot", hostErrText(err))
 			return failed(hostErrText(err))
 		}
 		r.SetRef(fmt.Sprintf("sent=%d", sent.Unix()))
@@ -264,6 +314,7 @@ func (a *app) stepReboot(ctx context.Context, r *tasks.Run) tasks.Result {
 			msg := fmt.Sprintf("%s didn't come back within %d minutes. Check it, then scan.", host.Name, int(rebootGiveUp.Minutes()))
 			_ = db.RecordActivity(a.db, host.ID, host.Name, "reboot_fail", msg)
 			r.Line("err", msg)
+			a.noteActionFailure(r, host, "reboot", fmt.Sprintf("didn't come back within %d minutes", int(rebootGiveUp.Minutes())))
 			return failed(msg)
 		}
 		if tries%4 == 3 {
@@ -566,6 +617,29 @@ func (a *app) nextTaskDismiss(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 }
 
+// taskLine is one running bulk action on the dashboard's status line.
+type taskLine struct {
+	What                                         string
+	Total, Done, Failed, Running, Queued, NotRun int
+}
+
+func (a *app) taskLines() []taskLine {
+	if a.tasks == nil {
+		return nil
+	}
+	var out []taskLine
+	for _, p := range a.tasks.Active() {
+		out = append(out, taskLine{What: strings.ToUpper(p.Kind[:1]) + p.Kind[1:],
+			Total: p.Total, Done: p.Done, Failed: p.Failed, Running: p.Running, Queued: p.Queued, NotRun: p.NotRun})
+	}
+	return out
+}
+
+// nextTaskStatus renders the status line (the page refreshes it as hosts start and finish).
+func (a *app) nextTaskStatus(w http.ResponseWriter, r *http.Request) {
+	a.renderNext(w, "taskstatus", map[string]any{"Lines": a.taskLines()})
+}
+
 // taskBanner is one "cut short by a restart" notice on the dashboard.
 type taskBanner struct {
 	ID, What, Hosts          string
@@ -627,6 +701,8 @@ func (a *app) nextEvents(w http.ResponseWriter, r *http.Request) {
 				send("state", map[string]string{"h": e.HostID, "s": e.State})
 			case "line":
 				send("line", map[string]any{"h": e.HostID, "q": e.Line.Seq, "c": e.Line.Class, "t": e.Line.Text})
+			case "task":
+				send("task", map[string]string{}) // a task finished: the status line refreshes
 			}
 		}
 	}

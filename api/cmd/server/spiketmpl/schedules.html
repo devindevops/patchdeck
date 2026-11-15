@@ -20,11 +20,11 @@
   </div>
   <h1 class="formhead" style="margin-bottom:14px">Schedules</h1>
 
-  <div class="formcard" style="margin-bottom:20px">
-    <div class="scard-h">{{template "i-clock"}}<h2>New schedule</h2></div>
-    <p class="scard-sub">Run a scan (or apply) on a host on a cron schedule. Times use the server timezone.</p>
+  <div class="formcard" id="schedform" style="margin-bottom:20px">
+    <div class="scard-h">{{template "i-clock"}}<h2>{{if .EditID}}Edit schedule{{else}}New schedule{{end}}</h2></div>
+    <p class="scard-sub">{{if .EditID}}Change what it runs, where and when. It keeps its run history and stays paused or active as it was.{{else}}Run a scan (or apply) on a host on a cron schedule. Times use the server timezone.{{end}}</p>
     {{if .Err}}<div class="formerr" style="margin-bottom:14px">{{.Err}}</div>{{end}}
-    <form class="form" hx-post="/schedules" hx-target="body" hx-swap="outerHTML">
+    <form class="form" hx-post="/schedules{{if .EditID}}/{{.EditID}}{{end}}" hx-target="body" hx-swap="outerHTML">
       <div class="field">
         <label for="name">Name <span class="hint" style="font-weight:400">(optional)</span></label>
         <input id="name" name="name" value="{{.Form.name}}" placeholder="Nightly scan" autocomplete="off">
@@ -56,9 +56,10 @@
       <div id="tgt-multi" class="field">
         <label>Hosts</label>
         <div class="checklist">
-          {{range .Hosts}}<label class="checkrow"><input type="checkbox" name="host_ids" value="{{.ID}}"><span class="ctext"><b>{{.Name}}</b></span></label>{{end}}
+          {{range .Hosts}}<label class="checkrow"><input type="checkbox" name="host_ids" value="{{.ID}}"{{if index $.Selected .ID}} checked{{end}}><span class="ctext"><b>{{.Name}}</b></span></label>{{end}}
         </div>
       </div>
+      <div id="tgt-all" class="field"><span class="hint">Every host Patchdeck manages <b>at the time it runs</b>, including hosts you add later.</span></div>
       <div class="field">
         <label for="mode">Mode</label>
         <select id="mode" name="mode">
@@ -66,7 +67,7 @@
           <option value="scan_apply"{{if eq .Form.mode "scan_apply"}} selected{{end}}>Scan, then apply</option>
           <option value="apply"{{if eq .Form.mode "apply"}} selected{{end}}>Apply</option>
         </select>
-        <span class="hint">Apply modes require the host&rsquo;s policy to allow scheduled apply.</span>
+        <span class="hint">For one host, apply modes need its policy to allow scheduled apply. Several hosts, a tag or All hosts apply to every host they cover.</span>
       </div>
       <div class="field">
         <label for="cron_expr">Cron expression</label>
@@ -79,11 +80,15 @@
         </div>
         <span class="hint">min hour day month weekday &mdash; e.g. <span class="mono">0 3 * * *</span> = daily 03:00, or <span class="mono">@daily</span>.</span>
       </div>
-      <button type="submit" class="btn primary block">Create schedule</button>
+      {{if .EditID}}<div class="c-actions">
+        <button type="submit" class="btn primary">Save changes</button>
+        <a class="btn ghost" href="/schedules">Cancel</a>
+      </div>
+      {{else}}<button type="submit" class="btn primary block">Create schedule</button>{{end}}
     </form>
   </div>
   <script>
-    function pdSchedTarget(){var t=document.getElementById('target').value;document.getElementById('tgt-one').hidden=(t!=='one');document.getElementById('tgt-tag').hidden=(t!=='tag');document.getElementById('tgt-multi').hidden=(t!=='multi');}
+    function pdSchedTarget(){var t=document.getElementById('target').value;document.getElementById('tgt-one').hidden=(t!=='one');document.getElementById('tgt-tag').hidden=(t!=='tag');document.getElementById('tgt-multi').hidden=(t!=='multi');document.getElementById('tgt-all').hidden=(t!=='all');}
     function pdCron(v){document.getElementById('cron_expr').value=v;}
     pdSchedTarget();
   </script>

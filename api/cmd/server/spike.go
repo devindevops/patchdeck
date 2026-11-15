@@ -411,7 +411,7 @@ func (a *app) nextDashboard(w http.ResponseWriter, r *http.Request) {
 	a.renderNext(w, "dashboard.html", map[string]any{
 		"Summary": summary, "AllHosts": views, "HasTags": hasTags,
 		"BulkConcurrency": a.cfg.BulkConcurrency, "ApplyStagger": a.cfg.ApplyStaggerSeconds,
-		"Banners": a.taskBanners(),
+		"Banners": a.taskBanners(), "TaskLines": a.taskLines(),
 	})
 }
 

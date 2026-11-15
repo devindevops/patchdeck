@@ -227,6 +227,26 @@ func TestPickSelection(t *testing.T) {
 	mustNotContain(t, "selconfirm/none", none, "hx-post")
 }
 
+// TestScheduleEditAndStatus: the edit form keeps a job's target, an all-hosts job says so on its
+// card, and the status line reads like a sentence.
+func TestScheduleEditAndStatus(t *testing.T) {
+	for want, j := range map[string]models.Job{
+		"all": {AllHosts: true}, "tag": {TagFilter: "web"}, "multi": {HostIDs: []string{"a", "b"}}, "one": {HostID: "a"},
+	} {
+		if got := jobTarget(j); got != want {
+			t.Errorf("jobTarget(%+v) = %s, want %s", j, got, want)
+		}
+	}
+	card := exec(t, "jobcard", models.Job{ID: "j1", Name: "Nightly", CronExpr: "0 3 * * *", Mode: "scan", AllHosts: true, Enabled: true})
+	mustContain(t, "jobcard", card, "all hosts")
+	mustContain(t, "jobcard", card, `href="/schedules/j1/edit#schedform"`)
+	st := exec(t, "taskstatus", map[string]any{"Lines": []taskLine{{What: "Apply", Total: 6, Done: 2, Running: 1, Queued: 3}}})
+	mustContain(t, "taskstatus", st, "<b>Apply</b> on 6 hosts: 2 done, 1 running, 3 queued")
+	if s := exec(t, "taskstatus", map[string]any{"Lines": []taskLine(nil)}); strings.Contains(s, "taskline") {
+		t.Errorf("no running task = no status line, got %q", s)
+	}
+}
+
 // TestEligibleForAll: the "… all" buttons act on exactly the hosts the dashboard counts. The
 // Patchdeck host and protected hosts never get a fleet-wide reboot or restart, and unapproved
 // hosts get nothing.

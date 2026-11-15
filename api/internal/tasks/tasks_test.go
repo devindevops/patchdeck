@@ -462,6 +462,52 @@ func TestResumeIgnoresCapAndStagger(t *testing.T) {
 	}
 }
 
+// TestOnFinishAndActive: the status line sees a running multi-host task's counts, and OnFinish
+// fires once, after the LAST host (the one notification per bulk run, v2.12.0).
+func TestOnFinishAndActive(t *testing.T) {
+	release := make(chan struct{})
+	var fin []string
+	var mu sync.Mutex
+	step := func(_ context.Context, r *Run) Result {
+		if r.HostID == "h2" {
+			<-release
+		}
+		return Result{}
+	}
+	m := New(testDB(t), Config{Concurrency: 2, Steps: map[string]Step{KindApply: step},
+		OnFinish: func(id string, n int) { mu.Lock(); fin = append(fin, fmt.Sprintf("%s:%d", id, n)); mu.Unlock() }})
+	id, _, _ := m.Start(KindApply, "t", hostsN(3))
+	m.Start(KindScan+"x", "t", hostsN(1)) // unknown kind: no task
+	deadline := time.Now().Add(3 * time.Second)
+	var act []Progress
+	for time.Now().Before(deadline) {
+		act = m.Active()
+		if len(act) == 1 && act[0].Done == 2 && act[0].Running == 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(act) != 1 || act[0].Kind != KindApply || act[0].Total != 3 || act[0].Done != 2 || act[0].Running != 1 {
+		t.Fatalf("active = %+v, want apply 3 hosts: 2 done, 1 running", act)
+	}
+	mu.Lock()
+	early := len(fin)
+	mu.Unlock()
+	if early != 0 {
+		t.Fatal("OnFinish fired before the last host was done")
+	}
+	close(release)
+	waitIdle(t, m)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(fin) != 1 || fin[0] != id+":3" {
+		t.Errorf("OnFinish = %v, want once with 3 hosts", fin)
+	}
+	if len(m.Active()) != 0 {
+		t.Error("nothing should be active after the task finished")
+	}
+}
+
 func TestPanicBecomesFailure(t *testing.T) {
 	d := testDB(t)
 	m := New(d, Config{Steps: map[string]Step{KindScan: func(context.Context, *Run) Result { panic("boom") }}})

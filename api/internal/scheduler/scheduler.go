@@ -335,6 +335,10 @@ func (e *Engine) runJob(ctx context.Context, j models.Job) {
 		e.finishRun(runID, "failed", 0, 0, 0, fmt.Sprintf("resolve hosts failed: %v", rerr))
 		return
 	}
+	if len(hosts) == 0 && j.AllHosts {
+		e.finishRun(runID, "success", 0, 0, 0, "no hosts yet") // an empty fleet isn't a failure
+		return
+	}
 	if len(hosts) == 0 {
 		log.Printf("scheduler: job=%s no hosts resolved (tag=%q host_ids=%v host_id=%s)", j.ID, j.TagFilter, j.HostIDs, j.HostID)
 		e.finishRun(runID, "failed", 0, 0, 0, "no hosts resolved (check tag / host selection)")
@@ -461,6 +465,12 @@ func (e *Engine) resolveJobHosts(j models.Job) ([]models.Host, error) {
 	// the API never leaks creds) — so those rows have an empty cipher.
 	var targets []models.Host
 	switch {
+	case j.AllHosts: // the whole fleet as it is NOW, including hosts added after the job was made
+		hs, err := db.ListHosts(e.db)
+		if err != nil {
+			return nil, err
+		}
+		targets = hs
 	case strings.TrimSpace(j.TagFilter) != "":
 		hs, err := db.ListHostsByTag(e.db, j.TagFilter)
 		if err != nil {

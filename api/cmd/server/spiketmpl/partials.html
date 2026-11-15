@@ -178,6 +178,7 @@
   .bulkbar{display:flex;flex-wrap:wrap;gap:9px;margin:13px 2px 0}
   .bulkbar .btn{display:inline-flex;align-items:center;gap:7px}
   .bulkbar .btn .ico{width:15px;height:15px}
+  .taskline{display:flex;align-items:center;gap:9px;margin-top:12px;padding:9px 13px;border-radius:11px;background:var(--accent-bg);color:var(--accent-2);font-size:13.5px}
   /* Selection (v2.11): in select mode a tap on a card toggles it instead of acting on it. */
   body.selecting article.card{cursor:pointer;-webkit-user-select:none;user-select:none}
   article.card.sel{outline:2px solid var(--accent);outline-offset:2px}
@@ -482,6 +483,12 @@
     var c=document.getElementById('card-'+h);
     if(c) htmx.ajax('GET','/hosts/'+h+'/card',{target:c,swap:'outerHTML'});
   }
+  // The dashboard's status line follows hosts starting and finishing (coalesced: one fetch per burst).
+  var stTimer=null;
+  function refreshStatus(){
+    if(stTimer || !document.getElementById('taskstatus')) return;
+    stTimer=setTimeout(function(){ stTimer=null; var el=document.getElementById('taskstatus'); if(el) htmx.ajax('GET','/tasks/status',{target:el,swap:'outerHTML'}); },400);
+  }
   function addLine(d){
     var log=document.getElementById('tasklog-'+d.h);
     if(!log){ (pend[d.h]=pend[d.h]||[]).push(d); if(pend[d.h].length>300) pend[d.h].shift(); return; }
@@ -516,6 +523,7 @@
       var dh=body().getAttribute('data-pdhost');
       if(dh && body().getAttribute('data-pdbusy')==='1' && !busy[dh]) location.reload();
       // Busy hosts: (re)load a panel only if it's missing or behind (a reconnect after a lag).
+      refreshStatus();
       Object.keys(busy).forEach(function(h){
         var log=document.getElementById('tasklog-'+h);
         if(log && parseInt(log.getAttribute('data-seq')||'0',10)>=(seq[h]||0)) return;
@@ -524,12 +532,14 @@
     });
     es.addEventListener('state',function(e){
       var d=JSON.parse(e.data);
+      refreshStatus();
       if(d.s==='idle'){ finished(d.h); return; }
       busyNow[d.h]=1;
       var p=document.getElementById('task-'+d.h);
       if(!p||p.getAttribute('data-st')!==d.s) busyView(d.h);
     });
     es.addEventListener('line',function(e){ addLine(JSON.parse(e.data)); });
+    es.addEventListener('task',refreshStatus); // a task finished (written AFTER its last host went idle)
   }
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',connect); else connect();
 })();
@@ -542,6 +552,10 @@
   {{if .Managed}}<div id="tasklog-{{.ID}}" class="scanlog" data-seq="{{.Seq}}">{{range .Lines}}<div class="ln{{if .Class}} {{.Class}}{{end}}">{{.Text}}</div>{{end}}</div>
   {{else}}<div class="scanlog"><div class="ln">Started by a schedule or the API, so there's no live output here. This refreshes when it finishes.</div></div>{{end}}
 </div>{{else if .ID}}<i hidden data-pdidle="{{.ID}}"></i>{{end}}{{end}}
+
+{{/* taskstatus — one line per running bulk action ("Apply on 6 hosts: 2 done, 1 running, 3 queued").
+     tasksjs re-fetches it whenever a host starts or finishes; empty when nothing is running. */}}
+{{define "taskstatus"}}<div id="taskstatus">{{range .Lines}}<div class="taskline"><span class="spinner"></span><span><b>{{.What}}</b> on {{.Total}} hosts: {{.Done}} done{{if .Failed}}, {{.Failed}} failed{{end}}{{if .Running}}, {{.Running}} running{{end}}{{if .Queued}}, {{.Queued}} queued{{end}}{{if .NotRun}}, {{.NotRun}} not run{{end}}</span></div>{{end}}</div>{{end}}
 
 {{/* tasknote — the one-line answer to a bulk start / resume. */}}
 {{define "tasknote"}}<div class="flash {{if .Err}}err{{else}}ok{{end}}"{{if .Started}} data-started="1"{{end}} style="margin-top:12px">{{.Msg}}</div>{{end}}
@@ -828,7 +842,7 @@
   </div>
   <div class="job-meta">
     <span class="job-cron">{{.CronExpr}}</span>
-    <span>{{if .TagFilter}}tag: {{.TagFilter}}{{else if .HostIDs}}{{len .HostIDs}} hosts{{else if .HostName}}{{.HostName}}{{else}}{{.HostID}}{{end}}</span>
+    <span>{{if .AllHosts}}all hosts{{else if .TagFilter}}tag: {{.TagFilter}}{{else if .HostIDs}}{{len .HostIDs}} hosts{{else if .HostName}}{{.HostName}}{{else}}{{.HostID}}{{end}}</span>
     {{if .NextRun}}<span>next {{.NextRun.Format "Jan 2 15:04"}}</span>{{end}}
     {{if .LastRun}}<span>last {{.LastRun.Status}}</span>{{end}}
     {{if not .Enabled}}<span>paused</span>{{end}}
@@ -836,6 +850,7 @@
   <div class="c-actions">
     {{if .Enabled}}<button class="btn ghost" hx-post="/schedules/{{.ID}}/toggle" hx-vals='{"enabled":"0"}' hx-target="#job-{{.ID}}" hx-swap="outerHTML">Pause</button>
     {{else}}<button class="btn primary" hx-post="/schedules/{{.ID}}/toggle" hx-vals='{"enabled":"1"}' hx-target="#job-{{.ID}}" hx-swap="outerHTML">Resume</button>{{end}}
+    <a class="btn ghost" href="/schedules/{{.ID}}/edit#schedform">Edit</a>
     <button class="btn ghost" hx-get="/schedules/{{.ID}}/runs" hx-target="#runs-{{.ID}}" hx-swap="innerHTML">Runs</button>
     <button class="btn danger" hx-post="/schedules/{{.ID}}/delete" hx-confirm="Delete this schedule?">Delete</button>
   </div>

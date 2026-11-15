@@ -115,6 +115,14 @@ func Migrate(db *sql.DB) error {
 	if err := ensureTableColumn(db, "jobs", "tag_filter", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// all_hosts: the job targets the whole fleet, resolved at every run (v2.12.0). Before, "All
+	// hosts" saved the host list at creation, so hosts added later were never scheduled.
+	if err := ensureTableColumn(db, "jobs", "all_hosts", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := convertAllHostJobs(db); err != nil {
+		return err
+	}
 	// reboot_reason columns
 	if err := ensureTableColumn(db, "scans", "reboot_reason", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
@@ -428,7 +436,7 @@ func DeleteHost(db *sql.DB, id string) error {
 // the host delete; it buffers all job rows before issuing writes (SQLite can't write
 // on a connection with an open read cursor).
 func reconcileJobsAfterHostDelete(tx *sql.Tx, hostID string) error {
-	rows, err := tx.Query(`SELECT id, host_id, host_ids_json, tag_filter FROM jobs`)
+	rows, err := tx.Query(`SELECT id, host_id, host_ids_json, tag_filter FROM jobs WHERE all_hosts=0`) // all-hosts jobs resolve at run time
 	if err != nil {
 		return err
 	}
@@ -532,23 +540,141 @@ func UpsertScanResult(db *sql.DB, hostID string, sr models.ScanResult) error {
 	return err
 }
 
-func CreateJob(db *sql.DB, j models.Job) error {
-	if j.Mode == "" {
-		j.Mode = "scan"
+// convertAllHostJobs (one-time, v2.12.0; Roy OK'd it): before v2.12 "All hosts" saved the hosts
+// that existed when the job was made. Such a job's list is exactly the hosts that existed when it
+// first ran (or, if it never ran, every current host). Turn it into a real all-hosts job so hosts
+// added since (and later) are scheduled too. A hand-picked list of every host looks the same and
+// is converted too (accepted).
+func convertAllHostJobs(db *sql.DB) error {
+	var done string
+	if err := db.QueryRow(`SELECT value FROM app_settings WHERE key='jobs_all_hosts_converted'`).Scan(&done); err == nil {
+		return nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
 	}
-	hostIDsJSON := "[]"
+	created := map[string]time.Time{} // host id → created_at
+	hrows, err := db.Query(`SELECT id, created_at FROM hosts`)
+	if err != nil {
+		return err
+	}
+	for hrows.Next() {
+		var id string
+		var at time.Time
+		if hrows.Scan(&id, &at) == nil {
+			created[id] = at
+		}
+	}
+	hrows.Close()
+	type jobRow struct{ id, hostIDsJSON string }
+	var cands []jobRow
+	jrows, err := db.Query(`SELECT id, host_ids_json FROM jobs WHERE all_hosts=0 AND tag_filter=''`)
+	if err != nil {
+		return err
+	}
+	for jrows.Next() {
+		var jr jobRow
+		if jrows.Scan(&jr.id, &jr.hostIDsJSON) == nil {
+			cands = append(cands, jr)
+		}
+	}
+	jrows.Close()
+	for _, jr := range cands {
+		var ids []string
+		_ = json.Unmarshal([]byte(jr.hostIDsJSON), &ids)
+		list := map[string]bool{}
+		for _, id := range ids {
+			if _, ok := created[id]; ok {
+				list[id] = true
+			}
+		}
+		// The hosts that existed when the job first ran (never ran: all of them).
+		var firstRun sql.NullTime // (the column itself, not min(): an aggregate loses the DATETIME type)
+		_ = db.QueryRow(`SELECT started_at FROM job_runs WHERE job_id=? ORDER BY started_at LIMIT 1`, jr.id).Scan(&firstRun)
+		then := map[string]bool{}
+		for id, at := range created {
+			if !firstRun.Valid || !at.After(firstRun.Time) {
+				then[id] = true
+			}
+		}
+		if len(then) == 0 || len(list) != len(then) {
+			continue
+		}
+		same := true
+		for id := range then {
+			if !list[id] {
+				same = false
+				break
+			}
+		}
+		if !same {
+			continue
+		}
+		if _, err := db.Exec(`UPDATE jobs SET all_hosts=1, host_ids_json='[]', host_id='' WHERE id=?`, jr.id); err != nil {
+			return err
+		}
+	}
+	_, err = db.Exec(`INSERT INTO app_settings(key,value) VALUES('jobs_all_hosts_converted','1')`)
+	return err
+}
+
+// jobTargetColumns turns a job's target into its stored columns: all hosts, a tag, or a host list
+// (host_id keeps the first host for older readers).
+func jobTargetColumns(j models.Job) (hostID, hostIDsJSON, tagFilter string, allHosts int) {
+	if j.AllHosts {
+		return "", "[]", "", 1
+	}
+	hostIDsJSON = "[]"
 	if len(j.HostIDs) > 0 {
 		b, _ := json.Marshal(j.HostIDs)
 		hostIDsJSON = string(b)
 	}
-	tagFilter := strings.TrimSpace(j.TagFilter)
-	// For backward compat, if HostID is empty but HostIDs has entries, use first
-	hostID := strings.TrimSpace(j.HostID)
+	tagFilter = strings.TrimSpace(j.TagFilter)
+	hostID = strings.TrimSpace(j.HostID)
 	if hostID == "" && len(j.HostIDs) > 0 {
 		hostID = j.HostIDs[0]
 	}
-	_, err := db.Exec(`INSERT INTO jobs(id,host_id,name,cron_expr,mode,enabled,host_ids_json,tag_filter) VALUES(?,?,?,?,?,?,?,?)`, uuid.NewString(), hostID, j.Name, j.CronExpr, j.Mode, boolToInt(j.Enabled), hostIDsJSON, tagFilter)
+	return hostID, hostIDsJSON, tagFilter, 0
+}
+
+func CreateJob(db *sql.DB, j models.Job) error {
+	if j.Mode == "" {
+		j.Mode = "scan"
+	}
+	hostID, hostIDsJSON, tagFilter, allHosts := jobTargetColumns(j)
+	_, err := db.Exec(`INSERT INTO jobs(id,host_id,name,cron_expr,mode,enabled,host_ids_json,tag_filter,all_hosts) VALUES(?,?,?,?,?,?,?,?,?)`, uuid.NewString(), hostID, j.Name, j.CronExpr, j.Mode, boolToInt(j.Enabled), hostIDsJSON, tagFilter, allHosts)
 	return err
+}
+
+// UpdateJob saves an edited job: name, schedule, mode and target. Its enabled state and run
+// history are kept.
+func UpdateJob(db *sql.DB, j models.Job) error {
+	if j.Mode == "" {
+		j.Mode = "scan"
+	}
+	hostID, hostIDsJSON, tagFilter, allHosts := jobTargetColumns(j)
+	res, err := db.Exec(`UPDATE jobs SET host_id=?, name=?, cron_expr=?, mode=?, host_ids_json=?, tag_filter=?, all_hosts=? WHERE id=?`,
+		hostID, j.Name, j.CronExpr, j.Mode, hostIDsJSON, tagFilter, allHosts, j.ID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// GetJob returns one job (by way of ListJobs: job counts are small).
+func GetJob(db *sql.DB, id string) (models.Job, error) {
+	jobs, err := ListJobs(db)
+	if err != nil {
+		return models.Job{}, err
+	}
+	for _, j := range jobs {
+		if j.ID == id {
+			return j, nil
+		}
+	}
+	return models.Job{}, sql.ErrNoRows
 }
 
 func UpdateJobEnabled(db *sql.DB, id string, enabled bool) error {
@@ -652,7 +778,7 @@ func PruneJobRuns(db *sql.DB, jobID string, keep int) error {
 
 func ListJobs(db *sql.DB) ([]models.Job, error) {
 	rows, err := db.Query(`
-		SELECT j.id, j.host_id, COALESCE(h.name,''), j.name, j.cron_expr, j.mode, j.enabled, j.host_ids_json, j.tag_filter
+		SELECT j.id, j.host_id, COALESCE(h.name,''), j.name, j.cron_expr, j.mode, j.enabled, j.host_ids_json, j.tag_filter, j.all_hosts
 		FROM jobs j
 		LEFT JOIN hosts h ON h.id = j.host_id
 		ORDER BY j.id DESC`)
@@ -663,12 +789,13 @@ func ListJobs(db *sql.DB) ([]models.Job, error) {
 	out := []models.Job{}
 	for rows.Next() {
 		var j models.Job
-		var enabled int
+		var enabled, allHosts int
 		var hostIDsJSON, tagFilter string
-		if err := rows.Scan(&j.ID, &j.HostID, &j.HostName, &j.Name, &j.CronExpr, &j.Mode, &enabled, &hostIDsJSON, &tagFilter); err != nil {
+		if err := rows.Scan(&j.ID, &j.HostID, &j.HostName, &j.Name, &j.CronExpr, &j.Mode, &enabled, &hostIDsJSON, &tagFilter, &allHosts); err != nil {
 			return nil, err
 		}
 		j.Enabled = enabled == 1
+		j.AllHosts = allHosts == 1
 		j.TagFilter = strings.TrimSpace(tagFilter)
 		j.HostIDs = []string{}
 		if strings.TrimSpace(hostIDsJSON) != "" && hostIDsJSON != "[]" {
