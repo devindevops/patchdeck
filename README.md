@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>The agentless patch dashboard for your homelab.</strong><br>
-  Scan, apply, reboot, and schedule updates across your Debian &amp; Ubuntu boxes — over plain SSH, from one self-hosted pane of glass.
+  Scan, apply, reboot, and schedule updates across your Debian, Ubuntu &amp; Proxmox boxes — over plain SSH, from one self-hosted pane of glass.
 </p>
 
 <p align="center">
@@ -23,7 +23,7 @@
 
 ---
 
-Keeping a homelab patched is death by a thousand `ssh box && sudo apt update && sudo apt upgrade`. Patchdeck gives you **one place to see what needs updating across every box** — your Proxmox VMs and LXC containers, your Raspberry Pis, that NUC in the closet, bare metal, anything you can reach over SSH — and to actually do something about it.
+Keeping a homelab patched is death by a thousand `ssh box && sudo apt update && sudo apt upgrade`. Patchdeck gives you **one place to see what needs updating across every box** — your Proxmox nodes, VMs and LXC containers, your Raspberry Pis, that NUC in the closet, bare metal, anything you can reach over SSH — and to actually do something about it.
 
 It's **agentless**: nothing to install on your hosts, no daemon phoning home. Patchdeck connects out over SSH, checks `apt`, and streams the output back live. It runs as a **single container** right next to the rest of your self-hosted stack, encrypts every credential at rest, and has **no cloud, no telemetry, and no account** — your fleet's details never leave the box.
 
@@ -57,26 +57,43 @@ It's **agentless**: nothing to install on your hosts, no daemon phoning home. Pa
 
 ## Features
 
+**See what needs patching**
 - **Agentless scanning** — connects out over SSH; nothing to deploy or maintain on your hosts
-- **One-click patching** — apply `apt` updates with real-time streaming output, right in the browser. The upgrade runs **detached on the host** (refreshing package lists first), so a dropped connection — a tailscale or network restart mid-upgrade, a bastion hiccup — never kills `apt` or loses the result: Patchdeck reattaches and records what actually happened
-- **Self-aware fleet apply** — **Apply all** (and scheduled apply jobs) patch the host Patchdeck runs on **last**, so its own network/docker restarts can't cut the other hosts' upgrades
-- **Intelligent service restart** — one **Restart services** action picks the right method per unit (a clean restart where it's safe, needrestart's coordinated handler where a naive restart would sever the session). Anything that comes back still flagged is **learned** and moved to a **reboot-required** bucket on its own — so you never have to guess which services actually need a reboot. A reboot (via Patchdeck or out-of-band) clears the learned set automatically.
-- **Reboot detection &amp; scoped fleet reboot** — surfaces `reboot-required` plus the exact services needing attention, split into restart-now vs reboot-required. **Reboot all** reboots only the hosts that need it — and never the host Patchdeck runs on, which it detects automatically (you can protect any other host too), each with its own "waiting for it to come back" watch
-- **First-connection host-key approval** — every new host's SSH key is captured and **held for your approval** before it's trusted; a changed key later pauses operations for re-approval (fail-closed, no silent trust)
-- **Live, filterable dashboard** — hosts that **need attention** are pinned on top and **re-file themselves the moment a scan changes their status** (no reload); filter by facet (updates · reboot/restart · healthy), search by name or tag, and optionally **group by tag** (tag hosts by role/site/environment)
-- **Scheduled maintenance** — cron schedules targeting a single host, a tag, several hosts, or **all hosts** (the whole fleet as it is at each run, so hosts you add later are included), with per-job run history (last/next run, per-host outcomes). Any schedule can be **edited** in place. Any host can opt out with **Skip this host in scheduled applies**: Apply schedules skip it, Scan + apply schedules only scan it, and you can still patch it by hand
-- **Bulk actions** — scan, apply, restart, or reboot across the fleet, each host streaming independently on its own card; concurrency-capped (`PATCHDECK_BULK_CONCURRENCY`) with an optional apply stagger (`PATCHDECK_APPLY_STAGGER_SECONDS`) so a large fleet doesn't bounce everything at once
-- **Act on a selection** — tap **Select**, tick the cards you want (or **All shown** for the current filter), and scan, apply, restart or reboot just those. The bar shows how many hosts each action fits; the confirm names them, warns about protected hosts you picked on purpose, and lists anything left out and why. The host Patchdeck runs on is never in a bulk reboot or restart
-- **Actions run on the server** — close the tab, lose your connection, or switch devices: every scan, apply, restart and reboot keeps going, and any page that opens later shows its live progress. A host does one thing at a time (manual, scheduled or API). If Patchdeck itself restarts mid-run, it reattaches to upgrades still running on hosts, finishes reboot watches, and offers **Resume remaining** for hosts that never started
-- **Activity log** — a timeline of every scan, apply, restart, reboot, and change, with configurable retention and CSV export
-- **Notifications** — native (no external dependency) alerts to Gotify, ntfy, Discord, Telegram, Slack, Pushover, email (SMTP), and webhooks — global and **per-host overrides**
-- **Single sign-on** — optional OIDC (Authorization Code + PKCE) alongside local password login
-- **Two-factor auth** — optional TOTP with one-time recovery codes on the local admin
-- **API tokens** — programmatic access with `Bearer` auth
+- **Live, filterable dashboard** — hosts that **need attention** are pinned on top and **re-file themselves the moment their status changes** (no reload); filter by facet (updates · reboot/restart · healthy), search by name or tag, and optionally **group by tag**
+- **Reboot and restart detection** — a pending reboot is caught from `/var/run/reboot-required` **and** from needrestart's kernel and CPU-microcode check (so Debian and Proxmox hosts running an older kernel than the one installed are flagged too, with the reason: `kernel 6.8.12-4 → 6.8.12-5`). Services still running old code are listed per host, split into restart-now vs reboot-required
+
+**Patch**
+- **One-click patching** — apply updates with live output in the browser. Each apply finishes any interrupted `dpkg` run, refreshes the package lists, then runs `apt-get dist-upgrade` (the full upgrade Debian and Proxmox recommend), keeping your existing config files on conflicts so nothing stops to ask
+- **Never loses an upgrade** — the upgrade runs **detached on the host**, so a dropped connection (a network or tailscale restart mid-upgrade, a bastion hiccup, Patchdeck itself restarting) never kills `apt` or loses the result: Patchdeck reattaches and records what actually happened
+- **Intelligent service restart** — one **Restart services** action picks the right method per unit (a clean restart where it's safe, needrestart's coordinated handler where a naive restart would sever the session). Anything still flagged afterwards is **learned** as reboot-required, so you never have to guess. A reboot clears the learned set
+- **Reboots you can walk away from** — Patchdeck waits for the host to really come back (its uptime resets), then re-scans it
+
+**Act on the whole fleet, or just part of it**
+- **Bulk actions** — **Scan all**, **Apply all**, **Restart all**, **Reboot all**, each host streaming on its own card, with a status line while it runs (*Apply on 6 hosts: 2 done, 1 running, 3 queued*)
+- **Act on a selection** — tap **Select**, tick the cards you want (or **All shown** for the current filter), and scan, apply, restart or reboot just those. The confirm names the hosts, warns about protected hosts you picked on purpose, and lists anything left out and why
+- **Actions run on the server** — close the tab, lose your connection, or switch devices: everything keeps going, and any page you open later shows its live progress. A host does one thing at a time (manual, scheduled or API). If Patchdeck restarts mid-run, it reattaches to upgrades still running on hosts, finishes reboot watches, and offers **Resume remaining** for hosts that never started
+- **Safe by default** — the host Patchdeck runs on is patched **last** and never swept by a bulk reboot or restart (detected automatically); protect any other host from fleet reboots; concurrency cap and apply stagger so a big fleet doesn't bounce all at once
+
+**Schedule it**
+- **Cron schedules** targeting one host, several hosts, a tag, or **All hosts** (the whole fleet as it is at each run, so hosts you add later are included) — scan, apply, or scan + apply, with per-job run history. Any schedule can be **edited** in place
+- **Per-host opt-out** — **Skip this host in scheduled applies**: Apply schedules skip it, Scan + apply schedules only scan it, and you can still patch it by hand
+
+**Know what happened**
+- **Notifications** — native alerts to Gotify, ntfy, Discord, Telegram, Slack, Pushover, email (SMTP), and webhooks: **one message per action or scheduled run**, sent when it finishes (or one per event, if you prefer). Global and **per-host** toggles
+- **Activity log** — every scan, apply, restart, reboot, and change, with configurable retention and CSV export
+
+**Access and security**
 - **Patchdeck's own SSH key** — an Ed25519 keypair generated on first start; pick **Patchdeck key** for a host and copy the public key from Settings. **Two-phase rotation** (both keys work until you finish, with a per-host "is the new key installed?" check) so rotating never locks you out
-- **Bastion / Warpgate support** — `user:target` logins, paste-to-fill from an `ssh` command, root-aware escalation (no sudo needed when the bastion logs in as root), and connection reuse so each operation is a single bastion session
+- **First-connection host-key approval** — every new host's SSH key is **held for your approval** before it's trusted; a changed key later pauses operations for re-approval (fail-closed, no silent trust)
+- **Bastion / Warpgate support** — `user:target` logins, paste-to-fill from an `ssh` command, root-aware escalation (no sudo needed when the bastion logs in as root), one bastion session per operation
+- **Single sign-on** (optional OIDC, Authorization Code + PKCE), **TOTP two-factor** with recovery codes, and **API tokens** (`Bearer`)
 - **Encrypted secrets** — AES-256-GCM at rest for every SSH credential; stored passwords and keys can be **cleared on save**
 - **HTTPS by default** — auto-generated self-signed cert out of the box; one env var to defer to your reverse proxy
+
+### Proxmox, VMs and LXC containers
+
+- **Proxmox VE nodes** work like any Debian host: Patchdeck runs the full `dist-upgrade` Proxmox requires and flags a new `-pve` kernel for a reboot. Mark nodes you'd rather patch by hand with **Skip this host in scheduled applies**.
+- **Add each VM and LXC container as its own host.** Patchdeck then sees and patches what's *inside* it (its own packages, services and reboots). The Proxmox node's card only covers the node itself.
 
 ## Quick Start
 
@@ -175,8 +192,8 @@ All configuration is via environment variables. Only `PATCHDECK_MASTER_KEY` is r
 | `PATCHDECK_SSH_TIMEOUT_SECONDS` | | `20` | SSH dial/handshake timeout |
 | `PATCHDECK_EXEC_TIMEOUT_SECONDS` | | `600` | Max wall-clock for a single remote command (scan/apply) |
 | `PATCHDECK_CONNECTIVITY_TIMEOUT_SECONDS` | | `15` | Timeout for the live dashboard connectivity check |
-| `PATCHDECK_BULK_CONCURRENCY` | | `4` | Max hosts a fleet-wide action (scan/apply/reboot all) drives at once; `<1` = no cap |
-| `PATCHDECK_APPLY_STAGGER_SECONDS` | | `0` | Minimum gap between successive apply-all starts (blast-radius safety); `0` = off |
+| `PATCHDECK_BULK_CONCURRENCY` | | `4` | Max hosts Patchdeck works on at once, across every running action (bulk, selections, single hosts); `<1` = no cap |
+| `PATCHDECK_APPLY_STAGGER_SECONDS` | | `0` | Minimum gap between successive applies (blast-radius safety); `0` = off |
 | `PATCHDECK_APPRISE_TIMEOUT_SECONDS` | | `10` | Notification delivery (HTTP/SMTP) timeout |
 | `PATCHDECK_APPRISE_URL` | | — | Default notification destination URL (see [Notifications](#notifications)) |
 | `PATCHDECK_TLS` | | `true` | Enable HTTPS with an auto-generated self-signed cert; set `false` if behind a reverse proxy |
@@ -193,9 +210,10 @@ All configuration is via environment variables. Only `PATCHDECK_MASTER_KEY` is r
 │  │ Go server                │  │
 │  │  · JSON API + token auth │  │
 │  │  · server-rendered UI    │  │   html/template + HTMX + SSE
+│  │  · task queue            │  │   actions run here, not in the browser
+│  │  · cron scheduler        │  │
 │  │  · SQLite (WAL)          │  │
 │  │  · native notifications  │  │
-│  │  · cron scheduler        │  │
 │  └───────────┬─────────────┘  │
 └──────────────┼────────────────┘
                │ outbound SSH
@@ -233,7 +251,7 @@ All configuration is via environment variables. Only `PATCHDECK_MASTER_KEY` is r
 
 ## Notifications
 
-Patchdeck delivers alerts (updates available, apply success/failure, scan failure) **natively in Go** — no python or Apprise dependency in the image. Configure a single destination URL in **Settings → Notifications** (or via `PATCHDECK_APPRISE_URL`), with optional **per-host overrides**. URLs follow the familiar Apprise-style scheme, so most existing URLs keep working.
+Patchdeck delivers alerts (new updates available, apply succeeded / failed, scan failed, restart or reboot failed) **natively in Go** — no python or Apprise dependency in the image. Configure a single destination URL in **Settings → Notifications** (or via `PATCHDECK_APPRISE_URL`), with optional **per-host overrides**. URLs follow the familiar Apprise-style scheme, so most existing URLs keep working.
 
 | Service | URL format | Notes |
 |---------|-----------|-------|
@@ -246,7 +264,12 @@ Patchdeck delivers alerts (updates available, apply success/failure, scan failur
 | **Email (SMTP)** | `mailtos://user:pass@smtp.host[:port]/?to=you@example.com` | `mailtos://` = TLS (465), `mailto://` = STARTTLS (587). Explicit SMTP host required |
 | **Webhook** | `jsons://host/path` or `forms://host/path` | `json*` posts JSON `{title,message,…}`, `form*` posts form data |
 
-**Digest delivery (default).** Instead of a push per host, each scheduled run sends **one message**: a title with the totals (`5 of 12 hosts need updates (24 packages, 4 security) · 1 failed`; prefixed `Patchdeck:` everywhere except Gotify, which already shows the app name) and a body listing every host that needs updates — security count, reboot/restart flags, and which hosts are new since the last scan. It only sends when something is new, an apply ran, or something failed (or every run, with **Send the scheduled digest every run**). Every dashboard action (a single host, the "… all" buttons, a selection) sends **one message the moment it finishes**, however long it takes, with no grouping timer; while a bulk action runs, the dashboard shows its progress ("Apply on 6 hosts: 2 done, 1 running, 3 queued"). API calls within about a minute of each other arrive as one message. Switch **Delivery** to **Per host** for the old one-message-per-event behaviour. Per-event and per-host toggles apply in both modes.
+**Digest delivery (default): one message per run.**
+- **Scheduled runs** send one message when the run ends: a title with the totals (`5 of 12 hosts need updates (24 packages, 4 security) · 1 failed`; prefixed `Patchdeck:` everywhere except Gotify, which already shows the app name) and a body listing every host that needs updates — security count, reboot/restart flags, and which hosts are new since the last scan. It only sends when something is new, an apply ran, or something failed (or every run, with **Send the scheduled digest every run**).
+- **Dashboard actions** — one host, an "… all" button, or a selection — send one message **the moment the action finishes**, however long it takes.
+- **API calls** within about a minute of each other arrive as one message.
+
+Switch **Delivery** to **Per host** for one message per event instead. The per-event and per-host toggles apply in both modes.
 
 > One destination per instance — use your notification backend (an ntfy topic, a webhook) for fan-out. Hit **Send test** to verify a URL before saving.
 
@@ -259,11 +282,13 @@ The web UI authenticates via an httpOnly session cookie. For automation, create 
 | `POST` | `/api/login` | Authenticate (sets session cookie) |
 | `GET` | `/api/hosts` | List all hosts |
 | `POST` | `/api/hosts` | Add a host |
-| `POST` | `/api/hosts/:id/scan` | Scan a host for updates (SSE stream) |
-| `POST` | `/api/hosts/:id/apply` | Apply updates (SSE stream) |
+| `POST` | `/api/hosts/:id/scan` · `/apply` | Scan, or apply updates; returns the result as JSON when done |
+| `GET` | `/api/hosts/:id/scan/stream` · `/apply/stream` | The same, streamed live (Server-Sent Events) |
+| `POST` | `/api/hosts/:id/restart-services` · `/restart-all` | Restart flagged services (chosen ones, or needrestart's own pass) |
 | `POST` | `/api/hosts/:id/power` | Reboot or shutdown |
+| `PUT` | `/api/hosts/:id/operations` | `checks_enabled`, `skip_scheduled_apply` |
 | `GET` | `/api/activity` · `/api/activity/export` | Activity log (paginated) · CSV export |
-| `GET/POST` | `/api/jobs` · `/api/jobs/:id/runs` | Scheduled jobs · run history |
+| `GET/POST` | `/api/jobs` · `/api/jobs/:id/runs` | Scheduled jobs (target `host_id`, `host_ids`, `tag_filter`, or `all_hosts: true`) · run history |
 | `PUT` | `/api/hosts/:id` | Update a host; blank secrets keep the stored ones, `clear_password` / `clear_private_key` / `clear_sudo_password: true` remove them |
 | `GET` | `/api/settings/ssh-key` | Patchdeck's public key (and the rotation's new key, if one is in progress) |
 | `POST` | `/api/settings/ssh-key/rotate` · `/check` · `/finish` · `/cancel` | Key rotation — `finish` takes optional `{"force": true}` |
