@@ -68,16 +68,16 @@ func (a *app) addTaskDigest(taskID string, add func(*notify.Digest)) {
 	add(d)
 }
 
-// sendTaskDigest sends a multi-host task's ONE notification once its last host is done — however
-// long the run took (v2.12.0: no more mid-run messages from the 5-minute coalescer cap). Nothing
-// notable (e.g. a Scan all that found nothing new) = nothing sent. ("Send the scheduled digest
-// every run" covers scheduled runs only.)
+// sendTaskDigest sends a task's ONE notification the moment its last host is done — however long
+// the run took, and with no grouping timer, for one host or many (v2.12.0 / v2.13.1). Nothing
+// notable (e.g. a scan that found nothing new) = nothing sent. ("Send the scheduled digest every
+// run" covers scheduled runs only.)
 func (a *app) sendTaskDigest(taskID string, hosts int) {
 	a.taskDigestMu.Lock()
 	d := a.taskDigests[taskID]
 	delete(a.taskDigests, taskID)
 	a.taskDigestMu.Unlock()
-	if d == nil || hosts < 2 || !d.Notable() {
+	if d == nil || !d.Notable() {
 		return
 	}
 	if err := a.notifier.SendDigest(a.currentAppriseURL(), *d); err != nil {
@@ -85,12 +85,8 @@ func (a *app) sendTaskDigest(taskID string, hosts int) {
 	}
 }
 
-// noteActionFailure puts a failed restart or reboot into a multi-host task's digest (single-host
-// actions stay quiet, as before).
+// noteActionFailure puts a failed restart or reboot into the task's digest.
 func (a *app) noteActionFailure(r *tasks.Run, host models.Host, phase, reason string) {
-	if r.Hosts < 2 {
-		return
-	}
 	// Gated like an apply failure (the "Apply failed" switch, global + per host).
 	a.notifyHost(r, host.ID, "auto_apply_failure", "", func(d *notify.Digest) {
 		d.Failed = append(d.Failed, notify.FailedHost{Name: host.Name, Phase: phase, Err: reason})
@@ -168,8 +164,8 @@ func (a *app) stepScan(ctx context.Context, r *tasks.Run) tasks.Result {
 }
 
 // stepApply runs the upgrade detached on the host (decision 0008) and records its id, so a
-// Patchdeck restart mid-apply reattaches instead of losing it. A multi-host task notifies through
-// the digest (one message for the batch); a single-host apply stays quiet as before.
+// Patchdeck restart mid-apply reattaches instead of losing it. Its outcome goes into the task's
+// digest (one message when the task finishes, v2.13.1).
 func (a *app) stepApply(ctx context.Context, r *tasks.Run) tasks.Result {
 	host, err := db.GetHost(a.db, r.HostID)
 	if err != nil {
@@ -198,15 +194,11 @@ func (a *app) stepApply(ctx context.Context, r *tasks.Run) tasks.Result {
 			_ = db.RecordActivity(a.db, host.ID, host.Name, "apply_fail", fmt.Sprintf("Apply failed: %v", err))
 			r.Line("err", "Apply failed: "+hostErrText(err))
 		}
-		if r.Hosts > 1 {
-			a.notifyApplyFailure(r, host, err)
-		}
+		a.notifyApplyFailure(r, host, err)
 		return failed(hostErrText(err))
 	}
 	_ = db.RecordActivity(a.db, host.ID, host.Name, "apply_ok", fmt.Sprintf("Applied updates: %d packages changed", res.ChangedPackages))
-	if r.Hosts > 1 {
-		a.notifyApplied(r, host, res)
-	}
+	a.notifyApplied(r, host, res)
 	msg := fmt.Sprintf("Applied — %d package(s) changed.", res.ChangedPackages)
 	r.Line("ok", msg)
 	a.rescan(ctx, host, r)

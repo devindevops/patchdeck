@@ -1399,15 +1399,16 @@ const (
 
 // notifyHost routes one dashboard/API host event (after the global + per-host toggles). In
 // per-host delivery it sends legacyBody immediately (the pre-2.7 behaviour; "" = stay silent).
-// In digest delivery, an event from a multi-host task (r) goes into THAT task's digest, sent once
-// when its last host finishes (v2.12.0, a.sendTaskDigest); anything else joins the coalesced batch.
+// In digest delivery, an event from a dashboard task (r, one host or many) goes into THAT task's
+// digest, sent the moment its last host finishes (v2.13.1, a.sendTaskDigest: no timer). Events with
+// no task (the JSON API) join the coalesced batch.
 func (a *app) notifyHost(r *tasks.Run, hostID, eventKey, legacyBody string, add func(*notify.Digest)) {
 	if !a.notificationEnabledForHostEvent(hostID, eventKey) {
 		return
 	}
 	s, err := db.GetNotificationSettings(a.db)
 	if err == nil && s.Delivery != models.DeliveryPerHost {
-		if r != nil && r.Hosts > 1 {
+		if r != nil {
 			a.addTaskDigest(r.TaskID, add)
 			return
 		}
