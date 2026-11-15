@@ -67,7 +67,7 @@
           <option value="scan_apply"{{if eq .Form.mode "scan_apply"}} selected{{end}}>Scan, then apply</option>
           <option value="apply"{{if eq .Form.mode "apply"}} selected{{end}}>Apply</option>
         </select>
-        <span class="hint">For one host, apply modes need its policy to allow scheduled apply. Several hosts, a tag or All hosts apply to every host they cover.</span>
+        <span class="hint">Apply modes update every host they cover, except hosts set to &ldquo;Skip this host in scheduled applies&rdquo;: Apply skips them, Scan + apply only scans them.</span>
       </div>
       <div class="field">
         <label for="cron_expr">Cron expression</label>

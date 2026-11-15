@@ -537,7 +537,7 @@ func (a *app) nextTaskStart(w http.ResponseWriter, r *http.Request) {
 			s := a.pickSelection(kind, views, strings.Split(r.FormValue("hosts"), ","))
 			hosts, busySel = s.Take, s.Busy
 		}
-		_, n, err := a.tasks.Start(kind, a.taskUser(r), hosts)
+		taskID, n, err := a.tasks.Start(kind, a.taskUser(r), hosts)
 		msg := ""
 		switch {
 		case err != nil:
@@ -554,7 +554,15 @@ func (a *app) nextTaskStart(w http.ResponseWriter, r *http.Request) {
 				msg += fmt.Sprintf(" %d busy host(s) left out.", skipped)
 			}
 		}
-		a.renderNext(w, "tasknote", map[string]any{"Msg": msg, "Err": err != nil, "Started": n > 0 && err == nil})
+		// The note names the hosts it queued, so the page turns those cards busy at once instead of
+		// waiting for the live stream (which can lag on a loaded box).
+		var queued []string
+		for _, h := range hosts {
+			if st, busy := a.tasks.Busy(h.ID); busy && st.TaskID == taskID && taskID != "" {
+				queued = append(queued, h.ID)
+			}
+		}
+		a.renderNext(w, "tasknote", map[string]any{"Msg": msg, "Err": err != nil, "Started": n > 0 && err == nil, "Hosts": strings.Join(queued, ",")})
 		return
 	}
 	host, err := db.GetHost(a.db, r.FormValue("host"))

@@ -25,7 +25,8 @@ type Host struct {
 	CreatedAt             time.Time             `json:"created_at"`
 	NotificationPrefs     HostNotificationPrefs `json:"notification_prefs"`
 	ChecksEnabled         bool                  `json:"checks_enabled"`
-	AutoUpdatePolicy      string                `json:"auto_update_policy"`
+	AutoUpdatePolicy      string                `json:"auto_update_policy"`   // unused since v2.13.0 (see SkipScheduledApply)
+	SkipScheduledApply    bool                  `json:"skip_scheduled_apply"` // scheduled applies skip this host; scans still run
 	HostKeyRequired       bool                  `json:"host_key_required"`
 	HostKeyTrustMode      string                `json:"host_key_trust_mode"`
 	HostKeyPinned         string                `json:"host_key_pinned_fingerprint,omitempty"`

@@ -46,6 +46,12 @@ func Migrate(db *sql.DB) error {
 	if err := ensureHostColumn(db, "checks_enabled", "INTEGER NOT NULL DEFAULT 1"); err != nil {
 		return err
 	}
+	// skip_scheduled_apply: the host opts out of scheduled applies (scans still run), enforced when
+	// a schedule runs (v2.13.0). It replaced auto_update_policy, which only gated creating a
+	// single-host apply schedule; that column stays, unused.
+	if err := ensureHostColumn(db, "skip_scheduled_apply", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	if err := ensureHostColumn(db, "auto_update_policy", "TEXT NOT NULL DEFAULT 'manual'"); err != nil {
 		return err
 	}
@@ -270,7 +276,7 @@ func CreateHost(db *sql.DB, h models.Host) (string, error) {
 		hostKeyMode = "tofu"
 	}
 	hostID := uuid.NewString()
-	_, err := db.Exec(`INSERT INTO hosts(id,name,address,port,ssh_user,auth_type,secret_cipher,checks_enabled,auto_update_policy,host_key_required,host_key_trust_mode,host_key_pinned_fingerprint,host_key_trusted_fingerprint,host_key_pending_fingerprint,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, hostID, h.Name, h.Address, h.Port, h.SSHUser, h.AuthType, h.SecretCipher, boolToInt(checksEnabled), autoPolicy, boolToInt(h.HostKeyRequired), hostKeyMode, strings.TrimSpace(h.HostKeyPinned), strings.TrimSpace(h.HostKeyTrusted), strings.TrimSpace(h.HostKeyPending), time.Now().UTC())
+	_, err := db.Exec(`INSERT INTO hosts(id,name,address,port,ssh_user,auth_type,secret_cipher,checks_enabled,auto_update_policy,host_key_required,host_key_trust_mode,host_key_pinned_fingerprint,host_key_trusted_fingerprint,host_key_pending_fingerprint,created_at,skip_scheduled_apply) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, hostID, h.Name, h.Address, h.Port, h.SSHUser, h.AuthType, h.SecretCipher, boolToInt(checksEnabled), autoPolicy, boolToInt(h.HostKeyRequired), hostKeyMode, strings.TrimSpace(h.HostKeyPinned), strings.TrimSpace(h.HostKeyTrusted), strings.TrimSpace(h.HostKeyPending), time.Now().UTC(), boolToInt(h.SkipScheduledApply))
 	if err != nil && isUniqueConstraintErr(err) {
 		return "", ErrHostExists
 	}
@@ -281,7 +287,7 @@ func CreateHost(db *sql.DB, h models.Host) (string, error) {
 }
 
 func ListHosts(db *sql.DB) ([]models.Host, error) {
-	rows, err := db.Query(`SELECT id,name,address,port,ssh_user,auth_type,checks_enabled,auto_update_policy,host_key_required,host_key_trust_mode,host_key_pinned_fingerprint,host_key_trusted_fingerprint,host_key_pending_fingerprint,host_key_last_verified_at,tags_json,exclude_from_bulk,created_at FROM hosts ORDER BY name`)
+	rows, err := db.Query(`SELECT id,name,address,port,ssh_user,auth_type,checks_enabled,auto_update_policy,host_key_required,host_key_trust_mode,host_key_pinned_fingerprint,host_key_trusted_fingerprint,host_key_pending_fingerprint,host_key_last_verified_at,tags_json,exclude_from_bulk,skip_scheduled_apply,created_at FROM hosts ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -289,12 +295,13 @@ func ListHosts(db *sql.DB) ([]models.Host, error) {
 	out := []models.Host{}
 	for rows.Next() {
 		var h models.Host
-		var checksEnabled, hostKeyRequired, excludeFromBulk int
+		var checksEnabled, hostKeyRequired, excludeFromBulk, skipApply int
 		var hostKeyLastVerified sql.NullTime
 		var tagsJSON string
-		if err := rows.Scan(&h.ID, &h.Name, &h.Address, &h.Port, &h.SSHUser, &h.AuthType, &checksEnabled, &h.AutoUpdatePolicy, &hostKeyRequired, &h.HostKeyTrustMode, &h.HostKeyPinned, &h.HostKeyTrusted, &h.HostKeyPending, &hostKeyLastVerified, &tagsJSON, &excludeFromBulk, &h.CreatedAt); err != nil {
+		if err := rows.Scan(&h.ID, &h.Name, &h.Address, &h.Port, &h.SSHUser, &h.AuthType, &checksEnabled, &h.AutoUpdatePolicy, &hostKeyRequired, &h.HostKeyTrustMode, &h.HostKeyPinned, &h.HostKeyTrusted, &h.HostKeyPending, &hostKeyLastVerified, &tagsJSON, &excludeFromBulk, &skipApply, &h.CreatedAt); err != nil {
 			return nil, err
 		}
+		h.SkipScheduledApply = skipApply == 1
 		h.ChecksEnabled = checksEnabled == 1
 		h.HostKeyRequired = hostKeyRequired == 1
 		h.ExcludeFromBulk = excludeFromBulk == 1
@@ -335,13 +342,14 @@ func ListHosts(db *sql.DB) ([]models.Host, error) {
 
 func GetHost(db *sql.DB, id string) (models.Host, error) {
 	var h models.Host
-	var checksEnabled, hostKeyRequired, excludeFromBulk int
+	var checksEnabled, hostKeyRequired, excludeFromBulk, skipApply int
 	var hostKeyLastVerified sql.NullTime
 	var tagsJSON string
-	err := db.QueryRow(`SELECT id,name,address,port,ssh_user,auth_type,secret_cipher,checks_enabled,auto_update_policy,host_key_required,host_key_trust_mode,host_key_pinned_fingerprint,host_key_trusted_fingerprint,host_key_pending_fingerprint,host_key_last_verified_at,tags_json,exclude_from_bulk,created_at FROM hosts WHERE id=?`, id).Scan(&h.ID, &h.Name, &h.Address, &h.Port, &h.SSHUser, &h.AuthType, &h.SecretCipher, &checksEnabled, &h.AutoUpdatePolicy, &hostKeyRequired, &h.HostKeyTrustMode, &h.HostKeyPinned, &h.HostKeyTrusted, &h.HostKeyPending, &hostKeyLastVerified, &tagsJSON, &excludeFromBulk, &h.CreatedAt)
+	err := db.QueryRow(`SELECT id,name,address,port,ssh_user,auth_type,secret_cipher,checks_enabled,auto_update_policy,host_key_required,host_key_trust_mode,host_key_pinned_fingerprint,host_key_trusted_fingerprint,host_key_pending_fingerprint,host_key_last_verified_at,tags_json,exclude_from_bulk,skip_scheduled_apply,created_at FROM hosts WHERE id=?`, id).Scan(&h.ID, &h.Name, &h.Address, &h.Port, &h.SSHUser, &h.AuthType, &h.SecretCipher, &checksEnabled, &h.AutoUpdatePolicy, &hostKeyRequired, &h.HostKeyTrustMode, &h.HostKeyPinned, &h.HostKeyTrusted, &h.HostKeyPending, &hostKeyLastVerified, &tagsJSON, &excludeFromBulk, &skipApply, &h.CreatedAt)
 	if err != nil {
 		return h, err
 	}
+	h.SkipScheduledApply = skipApply == 1
 	h.ChecksEnabled = checksEnabled == 1
 	h.HostKeyRequired = hostKeyRequired == 1
 	h.ExcludeFromBulk = excludeFromBulk == 1
@@ -886,12 +894,14 @@ func UpsertHostNotificationPrefs(db *sql.DB, hostID string, p models.HostNotific
 	return err
 }
 
-func UpdateHostOperationalControls(db *sql.DB, hostID string, checksEnabled bool, autoUpdatePolicy string) error {
+// UpdateHostOperationalControls saves checks-enabled and the scheduled-apply opt-out in ONE write
+// (a half-saved opt-out could let a schedule update a host the operator meant to skip).
+func UpdateHostOperationalControls(db *sql.DB, hostID string, checksEnabled bool, autoUpdatePolicy string, skipScheduledApply bool) error {
 	policy := strings.TrimSpace(strings.ToLower(autoUpdatePolicy))
 	if policy == "" {
 		policy = "manual"
 	}
-	res, err := db.Exec(`UPDATE hosts SET checks_enabled=?, auto_update_policy=? WHERE id=?`, boolToInt(checksEnabled), policy, hostID)
+	res, err := db.Exec(`UPDATE hosts SET checks_enabled=?, auto_update_policy=?, skip_scheduled_apply=? WHERE id=?`, boolToInt(checksEnabled), policy, boolToInt(skipScheduledApply), hostID)
 	if err != nil {
 		return err
 	}

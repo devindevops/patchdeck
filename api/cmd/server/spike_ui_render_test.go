@@ -132,6 +132,7 @@ func TestBusyCard(t *testing.T) {
 	busy := nextHostView{ID: "h1", Name: "one", HasScan: true, UpdateCount: 2, Busy: true}
 	out := exec(t, "card", busy)
 	mustContain(t, "card/busy", out, `data-busy="1"`)
+	mustContain(t, "card/busy", out, `id="dot-h1" class="dot dot-checking" hx-preserve="true"`) // no SSH re-check on going busy
 	mustContain(t, "card/busy", out, `hx-get="/hosts/h1/taskpanel" hx-trigger="load"`)
 	mustNotContain(t, "card/busy", out, "Apply 2")
 	mustNotContain(t, "card/busy", out, `"kind":"scan"`)
@@ -139,6 +140,7 @@ func TestBusyCard(t *testing.T) {
 	idle := exec(t, "card", nextHostView{ID: "h1", Name: "one", HasScan: true, UpdateCount: 2})
 	mustContain(t, "card/idle", idle, "Apply 2")
 	mustNotContain(t, "card/idle", idle, "taskpanel")
+	mustNotContain(t, "card/idle", idle, "hx-preserve") // a finished card re-checks its connection
 }
 
 // TestTaskPanel renders a running host's panel (with its buffered lines + last seq, so the page

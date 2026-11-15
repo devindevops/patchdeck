@@ -43,3 +43,23 @@ func TestAllHostsResolvesAtRunTime(t *testing.T) {
 		t.Errorf("all-hosts job resolved %v, want a,b", names)
 	}
 }
+
+// TestScheduledModeOptOut: the run-time rule behind "Skip this host in scheduled applies"
+// (v2.13.0). An apply job skips the host, a scan + apply job only scans it, a scan job is unchanged.
+func TestScheduledModeOptOut(t *testing.T) {
+	out := models.Host{ChecksEnabled: true, SkipScheduledApply: true}
+	in := models.Host{ChecksEnabled: true}
+	for _, tc := range []struct {
+		mode string
+		h    models.Host
+		want string
+	}{
+		{"apply", out, ""}, {"scan_apply", out, "scan"}, {"scan", out, "scan"},
+		{"apply", in, "apply"}, {"scan_apply", in, "scan_apply"},
+		{"scan", models.Host{ChecksEnabled: false}, ""},
+	} {
+		if got, why := scheduledMode(tc.mode, tc.h); got != tc.want {
+			t.Errorf("scheduledMode(%s, skip=%v checks=%v) = %q (%s), want %q", tc.mode, tc.h.SkipScheduledApply, tc.h.ChecksEnabled, got, why, tc.want)
+		}
+	}
+}

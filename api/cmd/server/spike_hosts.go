@@ -24,7 +24,7 @@ type hostFormView struct {
 	ID, Name, Address                                  string
 	Port                                               int
 	SSHUser, AuthType, HostKeyTrustMode, HostKeyPinned string
-	AutoUpdatePolicy                                   string
+	SkipScheduledApply                                 bool   // opted out of scheduled applies (v2.13.0)
 	Tags                                               string // comma-separated, for the input
 	ChecksEnabled                                      bool
 	Err                                                string
@@ -88,29 +88,23 @@ func formHostReq(r *http.Request) hostUpsertRequest {
 
 // formViewFromReq rebuilds the form view from a submitted request so a validation error
 // re-renders with the operator's typed values intact (secrets excluded).
-func formViewFromReq(mode, id string, req hostUpsertRequest, checks bool, policy, errMsg string) hostFormView {
+func formViewFromReq(mode, id string, req hostUpsertRequest, checks, skip bool, errMsg string) hostFormView {
 	return hostFormView{
 		Mode: mode, ID: id,
 		Name: req.Name, Address: req.Address, Port: req.Port, SSHUser: req.SSHUser,
 		AuthType: req.AuthType, HostKeyTrustMode: req.HostKeyTrustMode, HostKeyPinned: req.HostKeyPinned,
-		Tags: strings.Join(req.Tags, ", "), ChecksEnabled: checks, AutoUpdatePolicy: policy, Err: errMsg,
+		Tags: strings.Join(req.Tags, ", "), ChecksEnabled: checks, SkipScheduledApply: skip, Err: errMsg,
 	}
 }
 
 func formChecks(r *http.Request) bool { return r.FormValue("checks_enabled") != "" }
-func formPolicy(r *http.Request) string {
-	p := strings.TrimSpace(r.FormValue("auto_update_policy"))
-	if p == "" {
-		return "manual"
-	}
-	return p
-}
+func formSkip(r *http.Request) bool   { return r.FormValue("skip_scheduled_apply") != "" }
 
 // nextHostNew renders a blank add-host form.
 func (a *app) nextHostNew(w http.ResponseWriter, r *http.Request) {
 	a.renderHostForm(w, hostFormView{
 		Mode: "new", Port: 22, AuthType: "key", HostKeyTrustMode: "tofu",
-		ChecksEnabled: true, AutoUpdatePolicy: "manual",
+		ChecksEnabled: true,
 	})
 }
 
@@ -121,32 +115,29 @@ func (a *app) nextHostCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req := formHostReq(r)
-	checks, policy := formChecks(r), formPolicy(r)
+	checks, skip := formChecks(r), formSkip(r)
 	normalizeHostRequest(&req)
 	if msg := validateHostRequest(req); msg != "" {
-		a.renderHostForm(w, formViewFromReq("new", "", req, checks, policy, msg))
+		a.renderHostForm(w, formViewFromReq("new", "", req, checks, skip, msg))
 		return
 	}
 	scrubForAuth(&req)
 	enc, err := encryptHostSecrets(a.secrets, req)
 	if err != nil {
-		a.renderHostForm(w, formViewFromReq("new", "", req, checks, policy, "Failed to encrypt host credentials."))
+		a.renderHostForm(w, formViewFromReq("new", "", req, checks, skip, "Failed to encrypt host credentials."))
 		return
 	}
-	h := models.Host{Name: req.Name, Address: req.Address, Port: req.Port, SSHUser: req.SSHUser, AuthType: req.AuthType, SecretCipher: enc, ChecksEnabled: true, AutoUpdatePolicy: "manual", HostKeyRequired: true, HostKeyTrustMode: req.HostKeyTrustMode, HostKeyPinned: req.HostKeyPinned}
+	h := models.Host{Name: req.Name, Address: req.Address, Port: req.Port, SSHUser: req.SSHUser, AuthType: req.AuthType, SecretCipher: enc, ChecksEnabled: true, AutoUpdatePolicy: "manual", SkipScheduledApply: skip, HostKeyRequired: true, HostKeyTrustMode: req.HostKeyTrustMode, HostKeyPinned: req.HostKeyPinned}
 	hostID, err := db.CreateHost(a.db, h)
 	if err != nil {
 		msg := "Failed to save host."
 		if errors.Is(err, db.ErrHostExists) {
 			msg = "A host with the same address, port and SSH user already exists."
 		}
-		a.renderHostForm(w, formViewFromReq("new", "", req, checks, policy, msg))
+		a.renderHostForm(w, formViewFromReq("new", "", req, checks, skip, msg))
 		return
 	}
-	if policy != "scheduled_apply" {
-		policy = "manual"
-	}
-	_ = db.UpdateHostOperationalControls(a.db, hostID, checks, policy)
+	_ = db.UpdateHostOperationalControls(a.db, hostID, checks, "manual", skip) // (the opt-out is already in the INSERT)
 	_ = db.UpdateHostTags(a.db, hostID, req.Tags)
 	// New hosts require an explicit first-connection approval: store them "pinned" with no
 	// fingerprint so the first connection captures the key as pending (blocked) for review,
@@ -164,10 +155,6 @@ func (a *app) nextHostEdit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "host not found", http.StatusNotFound)
 		return
 	}
-	policy := strings.ToLower(strings.TrimSpace(host.AutoUpdatePolicy))
-	if policy == "" {
-		policy = "manual"
-	}
 	mode := strings.TrimSpace(host.HostKeyTrustMode)
 	if mode == "" {
 		mode = "tofu"
@@ -176,7 +163,7 @@ func (a *app) nextHostEdit(w http.ResponseWriter, r *http.Request) {
 	a.renderHostForm(w, withStored(hostFormView{
 		Mode: "edit", ID: host.ID, Name: host.Name, Address: host.Address, Port: host.Port,
 		SSHUser: host.SSHUser, AuthType: host.AuthType, HostKeyTrustMode: mode, HostKeyPinned: host.HostKeyPinned,
-		Tags: strings.Join(host.Tags, ", "), ChecksEnabled: host.ChecksEnabled, AutoUpdatePolicy: policy,
+		Tags: strings.Join(host.Tags, ", "), ChecksEnabled: host.ChecksEnabled, SkipScheduledApply: host.SkipScheduledApply,
 	}, stored))
 }
 
@@ -194,7 +181,7 @@ func (a *app) nextHostUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req := formHostReq(r)
-	checks, policy := formChecks(r), formPolicy(r)
+	checks, skip := formChecks(r), formSkip(r)
 	req.Name = strings.TrimSpace(req.Name)
 	req.Address = strings.TrimSpace(req.Address)
 	req.SSHUser = strings.TrimSpace(req.SSHUser)
@@ -222,7 +209,7 @@ func (a *app) nextHostUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	stored, err := decodeHostSecrets(a.secrets, existing.SecretCipher)
 	if err != nil {
-		a.renderHostForm(w, formViewFromReq("edit", id, req, checks, policy, "Failed to read existing host credentials."))
+		a.renderHostForm(w, formViewFromReq("edit", id, req, checks, skip, "Failed to read existing host credentials."))
 		return
 	}
 	removed := mergeHostSecrets(&req, stored)
@@ -231,12 +218,12 @@ func (a *app) nextHostUpdate(w http.ResponseWriter, r *http.Request) {
 	req.HostKeyTrustMode = "tofu"
 	req.HostKeyPinned = ""
 	if msg := validateHostRequest(req); msg != "" {
-		a.renderHostForm(w, withStored(formViewFromReq("edit", id, req, checks, policy, msg), stored))
+		a.renderHostForm(w, withStored(formViewFromReq("edit", id, req, checks, skip, msg), stored))
 		return
 	}
 	enc, err := encryptHostSecrets(a.secrets, req)
 	if err != nil {
-		a.renderHostForm(w, formViewFromReq("edit", id, req, checks, policy, "Failed to encrypt host credentials."))
+		a.renderHostForm(w, formViewFromReq("edit", id, req, checks, skip, "Failed to encrypt host credentials."))
 		return
 	}
 	updated := models.Host{ID: id, Name: req.Name, Address: req.Address, Port: req.Port, SSHUser: req.SSHUser, AuthType: req.AuthType, SecretCipher: enc}
@@ -245,13 +232,13 @@ func (a *app) nextHostUpdate(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, db.ErrHostExists) {
 			msg = "A host with the same address, port and SSH user already exists."
 		}
-		a.renderHostForm(w, formViewFromReq("edit", id, req, checks, policy, msg))
+		a.renderHostForm(w, formViewFromReq("edit", id, req, checks, skip, msg))
 		return
 	}
-	if policy != "scheduled_apply" {
-		policy = "manual"
+	if err := db.UpdateHostOperationalControls(a.db, id, checks, existing.AutoUpdatePolicy, skip); err != nil {
+		a.renderHostForm(w, formViewFromReq("edit", id, req, checks, skip, "Failed to save the host's settings (checks / skip scheduled applies)."))
+		return
 	}
-	_ = db.UpdateHostOperationalControls(a.db, id, checks, policy)
 	_ = db.UpdateHostTags(a.db, id, req.Tags)
 	summary := fmt.Sprintf("Host %s updated", req.Name)
 	if len(removed) > 0 {

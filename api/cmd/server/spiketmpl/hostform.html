@@ -108,13 +108,10 @@
           <input type="checkbox" name="checks_enabled" value="1"{{if .ChecksEnabled}} checked{{end}}>
           <span class="ctext"><b>Enable checks</b><span class="hint">Allow Patchdeck to scan and apply on this host.</span></span>
         </label>
-        <div class="field">
-          <label for="auto_update_policy">Auto-update policy</label>
-          <select id="auto_update_policy" name="auto_update_policy">
-            <option value="manual"{{if eq .AutoUpdatePolicy "manual"}} selected{{end}}>Manual &mdash; never auto-apply</option>
-            <option value="scheduled_apply"{{if eq .AutoUpdatePolicy "scheduled_apply"}} selected{{end}}>Allow scheduled apply jobs</option>
-          </select>
-        </div>
+        <label class="checkrow">
+          <input type="checkbox" name="skip_scheduled_apply" value="1"{{if .SkipScheduledApply}} checked{{end}}>
+          <span class="ctext"><b>Skip this host in scheduled applies</b><span class="hint">Schedules never update it: an Apply schedule skips it, a Scan + apply schedule only scans it (e.g. in an &ldquo;All hosts&rdquo; schedule). You can still apply by hand.</span></span>
+        </label>
       </div>
 
       <button type="submit" class="btn primary block">{{if eq .Mode "edit"}}Save changes{{else}}Add host{{end}}</button>

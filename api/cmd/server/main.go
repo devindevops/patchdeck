@@ -1788,8 +1788,9 @@ func (a *app) putHostOperationalControls(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req struct {
-		ChecksEnabled    *bool   `json:"checks_enabled"`
-		AutoUpdatePolicy *string `json:"auto_update_policy"`
+		ChecksEnabled      *bool   `json:"checks_enabled"`
+		AutoUpdatePolicy   *string `json:"auto_update_policy"`   // accepted for old clients; unused since v2.13.0
+		SkipScheduledApply *bool   `json:"skip_scheduled_apply"` // scheduled applies skip this host
 	}
 	if !decodeJSON(w, r, &req) {
 		return
@@ -1804,7 +1805,11 @@ func (a *app) putHostOperationalControls(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, 400, map[string]string{"error": "auto_update_policy must be manual|scheduled_apply"})
 		return
 	}
-	if err := db.UpdateHostOperationalControls(a.db, hostID, checksEnabled, policy); err != nil {
+	skip := host.SkipScheduledApply
+	if req.SkipScheduledApply != nil {
+		skip = *req.SkipScheduledApply
+	}
+	if err := db.UpdateHostOperationalControls(a.db, hostID, checksEnabled, policy, skip); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeJSON(w, 404, map[string]string{"error": "host not found"})
 			return
@@ -2340,10 +2345,11 @@ func validateJobModeAgainstHostControls(host models.Host, mode string) string {
 	if !host.ChecksEnabled {
 		return "cannot schedule apply job while host checks are disabled"
 	}
-	// A host set to manual updates must not get automated apply jobs scheduled
-	// against it — that's the whole point of the manual policy.
-	if strings.ToLower(strings.TrimSpace(host.AutoUpdatePolicy)) == "manual" {
-		return "cannot schedule apply job while host auto_update_policy is manual"
+	// (The old auto_update_policy check is gone, v2.13.0: it only blocked CREATING a single-host
+	// apply job. A host opts out with skip_scheduled_apply, enforced when the schedule runs; a
+	// single-host apply job on an opted-out host would never do anything, so it's refused here.)
+	if host.SkipScheduledApply {
+		return host.Name + " is set to skip scheduled applies: untick that on the host first, or schedule a scan"
 	}
 	return ""
 }

@@ -369,11 +369,23 @@ func (e *Engine) runJob(ctx context.Context, j models.Job) {
 			e.noteScanFailure(notes, host, fmt.Sprintf("Patchdeck: scheduled job skipped %s (busy with another action)", host.Name), "busy with another action; the scheduled job didn't run here")
 			continue
 		}
+		// Re-read the host now that it's ours: a wait can be long, and an opt-out (or checks off)
+		// ticked meanwhile must count.
+		if fresh, err := db.GetHost(e.db, host.ID); err == nil {
+			host = fresh
+		}
+		hostMode, why := scheduledMode(mode, host)
+		if hostMode == "" {
+			e.unlock(host.ID)
+			log.Printf("scheduler: job=%s skipped host=%s (%s)", j.ID, host.Name, why)
+			details = append(details, host.Name+": skipped ("+why+")")
+			continue
+		}
 		var hostOK, known bool
 		func() {
 			defer e.unlock(host.ID) // released even if the step panics (runJob recovers it)
 			known = true
-			switch mode {
+			switch hostMode {
 			case "scan":
 				hostOK = e.runScan(j, host, notes)
 			case "apply":
@@ -388,6 +400,9 @@ func (e *Engine) runJob(ctx context.Context, j models.Job) {
 			log.Printf("scheduler: job=%s unknown mode=%q", j.ID, j.Mode)
 			details = append(details, host.Name+": unknown mode")
 			continue
+		}
+		if hostOK && why != "" {
+			details = append(details, host.Name+": scanned only ("+why+")")
 		}
 		total++
 		if hostOK {
@@ -430,6 +445,24 @@ func (e *Engine) waitLock(hostID, what string) bool {
 		time.Sleep(schedLockPoll)
 	}
 	return true
+}
+
+// scheduledMode decides what a schedule does on one host (v2.13.0). A host that opted out of
+// scheduled applies is never updated by a schedule: an apply job skips it ("" = skip), a scan +
+// apply job only scans it. why says which rule applied ("" = none).
+func scheduledMode(mode string, h models.Host) (hostMode, why string) {
+	if !h.ChecksEnabled {
+		return "", "checks disabled"
+	}
+	if h.SkipScheduledApply {
+		switch mode {
+		case "apply":
+			return "", "opted out of scheduled applies"
+		case "scan_apply":
+			return "scan", "opted out of scheduled applies"
+		}
+	}
+	return mode, ""
 }
 
 func (e *Engine) unlock(hostID string) {

@@ -405,7 +405,10 @@
 {{define "card"}}<article id="card-{{.ID}}" class="card {{if or .PendingKey .Unverified (and .HasScan (or (gt .UpdateCount 0) .NeedsReboot (gt .RestartCount 0)))}}attn{{else}}calm{{end}}" data-name="{{.Name}}" data-addr="{{.Address}}" data-tags="{{range .Tags}}{{.}} {{end}}" data-attn="{{if or .PendingKey .Unverified (and .HasScan (or (gt .UpdateCount 0) .NeedsReboot (gt .RestartCount 0)))}}1{{else}}0{{end}}" data-updates="{{if gt .UpdateCount 0}}1{{else}}0{{end}}" data-reboot="{{if .RebootAny}}1{{else}}0{{end}}" data-restart="{{if .RestartOnly}}1{{else}}0{{end}}" data-updcount="{{.UpdateCount}}" data-seccount="{{.SecurityCount}}"{{if .Busy}} data-busy="1"{{end}}{{if .IsSelf}} data-self="1"{{end}}{{if or .Unverified .PendingKey}} data-locked="1"{{end}} data-fits="{{.Fits}}">
   <div class="c-top">
     <span class="host">
-      <span id="dot-{{.ID}}" class="dot dot-checking" hx-get="/hosts/{{.ID}}/dot" hx-trigger="load" hx-swap="outerHTML" aria-label="checking connectivity"></span>
+      {{/* A card re-rendered into its busy form keeps the dot it already has (hx-preserve) instead of
+           re-checking the host over SSH: a bulk action re-renders every card at once. The card
+           refreshed when the action finishes re-checks, so the dot stays current (e.g. after a reboot). */}}
+      <span id="dot-{{.ID}}" class="dot dot-checking"{{if .Busy}} hx-preserve="true"{{end}} hx-get="/hosts/{{.ID}}/dot" hx-trigger="load" hx-swap="outerHTML" aria-label="checking connectivity"></span>
       <a class="hn" href="/hosts/{{.ID}}">{{.Name}}</a>
     </span>
     <span class="os">{{if .OSShort}}{{.OSShort}}{{else}}{{.Address}}{{end}}</span>
@@ -497,6 +500,13 @@
     log.appendChild(div); log.setAttribute('data-seq',d.q); log.scrollTop=log.scrollHeight;
   }
   document.addEventListener('htmx:afterSettle',function(){
+    // A bulk start names the hosts it queued: show them busy now, without waiting for the stream.
+    var started={};
+    [].slice.call(document.querySelectorAll('[data-started-hosts]')).forEach(function(n){
+      n.getAttribute('data-started-hosts').split(',').forEach(function(h){ if(h) started[h]=1; });
+      n.removeAttribute('data-started-hosts');
+    });
+    Object.keys(started).forEach(function(h){ busyNow[h]=1; busyView(h); });
     // A panel asked for after its host went idle comes back as an idle marker: refresh instead.
     [].slice.call(document.querySelectorAll('[data-pdidle]')).forEach(function(m){ var h=m.getAttribute('data-pdidle'); m.remove(); finished(h); });
     // Never two panels for one host: keep the newest (the one the click just brought).
@@ -558,7 +568,7 @@
 {{define "taskstatus"}}<div id="taskstatus">{{range .Lines}}<div class="taskline"><span class="spinner"></span><span><b>{{.What}}</b> on {{.Total}} hosts: {{.Done}} done{{if .Failed}}, {{.Failed}} failed{{end}}{{if .Running}}, {{.Running}} running{{end}}{{if .Queued}}, {{.Queued}} queued{{end}}{{if .NotRun}}, {{.NotRun}} not run{{end}}</span></div>{{end}}</div>{{end}}
 
 {{/* tasknote — the one-line answer to a bulk start / resume. */}}
-{{define "tasknote"}}<div class="flash {{if .Err}}err{{else}}ok{{end}}"{{if .Started}} data-started="1"{{end}} style="margin-top:12px">{{.Msg}}</div>{{end}}
+{{define "tasknote"}}<div class="flash {{if .Err}}err{{else}}ok{{end}}"{{if .Started}} data-started="1"{{end}}{{if .Hosts}} data-started-hosts="{{.Hosts}}"{{end}} style="margin-top:12px">{{.Msg}}</div>{{end}}
 
 {{/* seljs — select mode (decision 0009 part 2). A capture-phase click handler turns a tap on a card
      into a toggle, so the card's own buttons and links never fire while selecting. The bar counts,

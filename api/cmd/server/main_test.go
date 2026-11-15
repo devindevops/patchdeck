@@ -178,7 +178,8 @@ func TestValidateJobModeAgainstHostControls(t *testing.T) {
 	}{
 		{name: "scan allowed when checks disabled", host: models.Host{ChecksEnabled: false, AutoUpdatePolicy: "manual"}, mode: "scan", want: ""},
 		{name: "apply blocked when checks disabled", host: models.Host{ChecksEnabled: false, AutoUpdatePolicy: "scheduled_apply"}, mode: "apply", want: "cannot schedule apply job while host checks are disabled"},
-		{name: "apply blocked when policy manual", host: models.Host{ChecksEnabled: true, AutoUpdatePolicy: "manual"}, mode: "apply", want: "cannot schedule apply job while host auto_update_policy is manual"},
+		// v2.13.0: the old policy no longer blocks creating a job (skip_scheduled_apply is enforced at run time).
+		{name: "apply allowed whatever the old policy", host: models.Host{ChecksEnabled: true, AutoUpdatePolicy: "manual"}, mode: "apply", want: ""},
 		{name: "apply allowed for scheduled_apply", host: models.Host{ChecksEnabled: true, AutoUpdatePolicy: "scheduled_apply"}, mode: "apply", want: ""},
 	}
 
@@ -289,4 +290,16 @@ func TestAcceptHostKeyFingerprintRequiresPendingAndAudits(t *testing.T) {
 func contextWithRoute(req *http.Request, rctx *chi.Context) context.Context {
 	ctx := req.Context()
 	return context.WithValue(ctx, chi.RouteCtxKey, rctx)
+}
+
+// TestApplyJobRefusedForOptedOutHost: a single-host apply schedule on a host that skips scheduled
+// applies would never do anything, so creating it is refused (v2.13.0).
+func TestApplyJobRefusedForOptedOutHost(t *testing.T) {
+	h := models.Host{Name: "db1", ChecksEnabled: true, SkipScheduledApply: true}
+	if got := validateJobModeAgainstHostControls(h, "apply"); got == "" {
+		t.Error("an apply job on an opted-out host should be refused")
+	}
+	if got := validateJobModeAgainstHostControls(h, "scan"); got != "" {
+		t.Errorf("a scan job is fine: %q", got)
+	}
 }
