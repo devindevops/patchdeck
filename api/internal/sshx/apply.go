@@ -83,6 +83,7 @@ if [ -f "$L.rc" ]; then
   echo "__PD_APPLY_RC__=$(cat "$L.rc")"
   echo "__PD_SETUP_COUNT__=$(grep -c '^Setting up ' "$L.log")"
   test -f /var/run/reboot-required && echo __REBOOT__ || true
+  command -v needrestart >/dev/null 2>&1 && needrestart -b 2>/dev/null | grep -Eq '^NEEDRESTART-(KSTA: [23]|UCSTA: 2)' && echo __REBOOT__ || true
 else echo __PD_APPLY_LOST__; fi
 `, from, from)
 }

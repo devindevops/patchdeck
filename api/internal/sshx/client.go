@@ -235,6 +235,17 @@ func parseScanOutput(raw string, hostID string) models.ScanResult {
 			}
 		}
 	}
+	// needrestart's own kernel / microcode verdict. On Debian and Proxmox nothing writes
+	// /var/run/reboot-required for a new kernel (that's Ubuntu's update-notifier or unattended-
+	// upgrades), so a host running an older kernel than the one installed only shows up here.
+	if why := needrestartRebootReason(lines); why != "" {
+		needsReboot = true
+		if rebootReason == "" {
+			rebootReason = why
+		} else {
+			rebootReason += "; " + why
+		}
+	}
 	return models.ScanResult{
 		HostID:           hostID,
 		Packages:         pkgs,
@@ -356,6 +367,35 @@ func (c *Client) ScanHost(host models.Host, seal *crypto.SealBox) (models.ScanRe
 
 func (c *Client) ApplyUpdates(host models.Host, seal *crypto.SealBox) (models.ApplyResult, error) {
 	return c.applyDetached(context.Background(), host, seal, nil)
+}
+
+// needrestartRebootReason reads needrestart -b's kernel and microcode lines. KSTA 2 (an ABI-
+// compatible kernel upgrade) or 3 (a newer kernel version) means the running kernel is older than
+// the installed one; UCSTA 2 means newer CPU microcode is waiting. Each needs a reboot. Returns ""
+// when neither does (or needrestart didn't report them).
+func needrestartRebootReason(lines []string) string {
+	kv := map[string]string{}
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		if !strings.HasPrefix(l, "NEEDRESTART-") {
+			continue
+		}
+		if k, v, ok := strings.Cut(strings.TrimPrefix(l, "NEEDRESTART-"), ":"); ok {
+			kv[k] = strings.TrimSpace(v)
+		}
+	}
+	var why []string
+	if s := kv["KSTA"]; s == "2" || s == "3" {
+		if kv["KCUR"] != "" && kv["KEXP"] != "" && kv["KCUR"] != kv["KEXP"] {
+			why = append(why, "kernel "+kv["KCUR"]+" → "+kv["KEXP"])
+		} else {
+			why = append(why, "a newer kernel is installed")
+		}
+	}
+	if kv["UCSTA"] == "2" {
+		why = append(why, "CPU microcode update")
+	}
+	return strings.Join(why, "; ")
 }
 
 // isSystemdManagerUnit reports whether a needrestart-listed "service" is really the
