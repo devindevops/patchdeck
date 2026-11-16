@@ -112,3 +112,31 @@ func TestIsUnitNotFoundText(t *testing.T) {
 		t.Error("should not flag a generic failure as not-found")
 	}
 }
+
+// nova 2026-11-13: unattended-upgrades was batched into a plain detached restart and died 22 s
+// later. No-live-restart units must go the handler-or-refuse way, never a plain restart, even when
+// a stale scan still lists them as restartable.
+func TestNoLiveRestartUnitsAreNeverRestartedPlainly(t *testing.T) {
+	batchable, special := splitRestartBatch([]string{"docker.service", "unattended-upgrades.service", "user@1000.service", "cron.service"})
+	if !reflect.DeepEqual(batchable, []string{"docker.service", "cron.service"}) {
+		t.Errorf("batchable=%v", batchable)
+	}
+	if !reflect.DeepEqual(special, []string{"unattended-upgrades.service", "user@1000.service"}) {
+		t.Errorf("special=%v", special)
+	}
+	for _, svc := range special {
+		cmd := deferredRestartCmd(svc)
+		if !strings.Contains(cmd, needrestartHandlerAbsentMarker) || strings.Contains(cmd, "systemctl restart") {
+			t.Errorf("%s: want handler-or-refuse, got %q", svc, cmd)
+		}
+		if !strings.Contains(cmd, "/etc/needrestart/restart.d/"+svc) {
+			t.Errorf("%s: a host's own needrestart handler must still be used: %q", svc, cmd)
+		}
+		if !strings.Contains(refusedRestartLine(svc), "left for the next reboot") {
+			t.Errorf("%s: refusal should say it waits for the reboot: %q", svc, refusedRestartLine(svc))
+		}
+	}
+	if strings.Contains(refusedRestartLine("dbus.service"), "left for the next reboot") {
+		t.Error("dbus keeps its reboot-required wording")
+	}
+}

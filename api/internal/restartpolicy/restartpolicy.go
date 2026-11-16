@@ -39,6 +39,70 @@ func IsKnownRebootOnly(svc string) bool {
 	return false
 }
 
+// noLiveExact / noLivePrefix: needrestart's own stock override_rc list (Debian 13 needrestart 3.11,
+// Ubuntu 24.04 3.6), minus the daemons Patchdeck restarts on purpose as the opt-in alternative to a
+// reboot (docker, network daemons, gettys, libvirt…). What's left are units where a restart is not
+// a library refresh: it re-runs a one-time job (rc-local, cloud-init, cron-*, the google scripts),
+// kills or starts an apt run (apt-daily*), ends sessions (user@N, display managers, xrdp), or breaks
+// a shutdown helper (unattended-upgrades: restarted live on nova 2026-11-13 after a glibc update,
+// the fresh copy exited 1 after 22 s and stayed failed for 3 days). Matching mirrors needrestart's
+// regexes: exact names compare without ".service"; prefixes match the start of the name.
+var noLiveExact = map[string]bool{
+	"unattended-upgrades": true, "apt-daily": true, "apt-daily-upgrade": true,
+	"rc-local": true, "emergency": true, "rescue": true,
+	"cloud-init-local": true, "cloud-init": true, "cloud-config": true, "cloud-final": true,
+	"google-shutdown-scripts": true, "google-startup-scripts": true,
+}
+
+var noLivePrefix = []string{
+	"cron-",
+	"gdm", "greetd", "kdm", "nodm", "sddm", "wdm", "xdm", "lightdm", "slim", "lxdm", "xrdp",
+}
+
+// IsNoLiveRestart reports whether a unit must never be restarted on a running host (see
+// noLiveExact). Such a unit is left for the next reboot — and, unlike a reboot-only daemon, it does
+// NOT make the host "need a reboot": running it on the old library until then is harmless, and
+// counting it would flag nearly every Debian/Ubuntu host after each libc/python/openssl update.
+func IsNoLiveRestart(svc string) bool {
+	n := strings.TrimSuffix(norm(svc), ".service")
+	if noLiveExact[n] {
+		return true
+	}
+	if rest, ok := strings.CutPrefix(n, "user@"); ok && rest != "" && strings.Trim(rest, "0123456789") == "" {
+		return true
+	}
+	for _, p := range noLivePrefix {
+		if strings.HasPrefix(n, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// SplitAtReboot splits a reboot-only list into the units that really need a reboot (loud) and the
+// no-live-restart ones that simply clear at the next reboot (quiet; see IsNoLiveRestart).
+func SplitAtReboot(rebootOnly []string) (loud, quiet []string) {
+	for _, s := range rebootOnly {
+		if IsNoLiveRestart(s) {
+			quiet = append(quiet, s)
+		} else {
+			loud = append(loud, s)
+		}
+	}
+	return
+}
+
+// CountLive counts the flagged units that matter now: everything except the no-live-restart ones.
+func CountLive(needsRestart []string) int {
+	n := 0
+	for _, s := range needsRestart {
+		if !IsNoLiveRestart(s) {
+			n++
+		}
+	}
+	return n
+}
+
 // IsRisky reports whether a plain `systemctl restart` over SSH is destructive to the session
 // (the bus + the login-session manager). These must go through needrestart's coordinated
 // handler or a detached restart — never a naive live restart.
@@ -85,7 +149,7 @@ func Classify(needsRestart []string, handlers, resistant map[string]bool) (resta
 		switch {
 		case resistant[s]:
 			rebootOnly = append(rebootOnly, s)
-		case (IsDbusFamily(s) || IsKnownRebootOnly(s)) && !handlers[s]:
+		case (IsDbusFamily(s) || IsKnownRebootOnly(s) || IsNoLiveRestart(s)) && !handlers[s]:
 			rebootOnly = append(rebootOnly, s)
 		default:
 			restartable = append(restartable, s)

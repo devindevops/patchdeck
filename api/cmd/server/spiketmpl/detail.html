@@ -93,6 +93,12 @@
   </div>
   {{end}}
 
+  {{if .V.AtRebootServices}}
+  <div class="section-h">Clears at next reboot ({{len .V.AtRebootServices}})</div>
+  <p class="formsub" style="margin:0 0 7px">Restarting these on a running host isn&rsquo;t safe (it re-runs a job, ends sessions or breaks a shutdown helper), so Patchdeck leaves them alone. They pick up the update at the next reboot &mdash; nothing to do now.</p>
+  <div class="units">{{range .V.AtRebootServices}}<span class="pill muted">{{.}}</span>{{end}}</div>
+  {{end}}
+
   <div class="section-h">Available updates ({{len .Snap.Packages}})</div>
   {{if .Snap.Packages}}
   <div class="tablewrap"><table class="pkgs">

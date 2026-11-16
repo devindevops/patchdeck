@@ -414,7 +414,8 @@ func isSystemdManagerUnit(svc string) bool {
 // no real `systemd-user.service` to `systemctl restart` — the per-user managers refresh on
 // the next login/reboot. So it is filtered out of the restart list and skipped if it slips
 // through (NOT treated as a failure). The real per-user instance `user@<uid>.service` is a
-// genuine unit and is intentionally NOT matched here.
+// genuine unit and is NOT matched here; it is a no-live-restart unit instead (restarting it ends
+// that user's session and user services), see restartpolicy.IsNoLiveRestart.
 func isUserManagerUnit(svc string) bool {
 	switch strings.ToLower(strings.TrimSpace(svc)) {
 	case "systemd-user", "systemd-user.service":
@@ -448,6 +449,16 @@ func isRiskyRestartUnit(svc string) bool { return restartpolicy.IsRisky(svc) }
 // dispatch immediately. svc is pre-validated by validServiceName (alnum plus . _ - @ : — no
 // spaces, quotes, slashes, or other shell metacharacters), so interpolating it into the
 // fixed handler-dir path cannot escape the directory or inject a command.
+// refusedRestartLine is the result line for a unit Patchdeck won't restart live (no needrestart
+// handler on the host): the session-severing ones need a reboot; the no-live-restart ones simply
+// pick up the update at the next reboot.
+func refusedRestartLine(svc string) string {
+	if restartpolicy.IsNoLiveRestart(svc) {
+		return "• " + svc + " — left for the next reboot (restarting it on a running host isn't safe: it re-runs a job, ends sessions or breaks a shutdown helper)"
+	}
+	return "⚠ " + svc + " — cannot be safely restarted on a running host (a live restart severs D-Bus/logind and locks out SSH); reboot to apply (no needrestart coordinated-restart handler available)"
+}
+
 func riskyRestartCmd(svc string) string {
 	h := "/etc/needrestart/restart.d/" + svc
 	return "if [ -x \"" + h + "\" ]; then DEBIAN_FRONTEND=noninteractive \"" + h + "\"; else echo " + needrestartHandlerAbsentMarker + "; fi"
@@ -470,7 +481,7 @@ func isDbusFamily(svc string) bool { return restartpolicy.IsDbusFamily(svc) }
 // restart of the bus would lock the operator out. svc is pre-validated by validServiceName.
 func deferredRestartCmd(svc string) string {
 	h := "/etc/needrestart/restart.d/" + svc
-	if isDbusFamily(svc) {
+	if isDbusFamily(svc) || restartpolicy.IsNoLiveRestart(svc) {
 		return "if [ -x \"" + h + "\" ]; then DEBIAN_FRONTEND=noninteractive \"" + h + "\"; else echo " + needrestartHandlerAbsentMarker + "; fi"
 	}
 	detached := "systemd-run --collect --description=\"patchdeck restart " + svc + "\" systemctl restart " + svc
@@ -575,14 +586,14 @@ func (c *Client) RestartServices(host models.Host, seal *crypto.SealBox, service
 		// sever the session bus and lock out SSH. Delegate to needrestart's coordinated
 		// handler when the host has one; otherwise refuse and mark the unit reboot-required
 		// rather than run the destructive command.
-		if isRiskyRestartUnit(svc) {
+		if isRiskyRestartUnit(svc) || restartpolicy.IsNoLiveRestart(svc) {
 			out, err := c.runPrivileged(context.Background(), host, seal, riskyRestartCmd(svc))
 			switch {
 			case isHostKeyErr(err):
 				return models.RestartResult{}, err
 			case strings.Contains(out, needrestartHandlerAbsentMarker):
 				rebootRequired = append(rebootRequired, svc)
-				lines = append(lines, "⚠ "+svc+" — cannot be safely restarted on a running host (a live restart severs D-Bus/logind and locks out SSH); reboot to apply (no needrestart coordinated-restart handler available)")
+				lines = append(lines, refusedRestartLine(svc))
 			case err == nil:
 				lines = append(lines, "✓ "+svc+" — restarted safely via needrestart (coordinated: bus + its clients re-registered)")
 			case errors.Is(err, ErrConnectionLost):
@@ -697,10 +708,11 @@ const restartBatchMarker = "PDSVCRESULT"
 // splitRestartBatch partitions restartable units into the ones we escalate-once-and-batch (the
 // common case: a detached `systemd-run systemctl restart`, safe to run many in a single root
 // session) versus the ones we still handle individually because their restart must go through
-// needrestart's coordinated handler and can sever the session (the D-Bus bus, logind).
+// needrestart's coordinated handler and can sever the session (the D-Bus bus, logind), plus the
+// no-live-restart units (handler or refused — never a plain restart; restartpolicy.IsNoLiveRestart).
 func splitRestartBatch(services []string) (batchable, special []string) {
 	for _, s := range services {
-		if isRiskyRestartUnit(s) {
+		if isRiskyRestartUnit(s) || restartpolicy.IsNoLiveRestart(s) {
 			special = append(special, s)
 			continue
 		}
@@ -899,7 +911,7 @@ func (c *Client) RestartDeferredDetached(host models.Host, seal *crypto.SealBox,
 			return models.RestartResult{}, err
 		case strings.Contains(out, needrestartHandlerAbsentMarker):
 			rebootRequired = append(rebootRequired, svc)
-			done[svc] = "⚠ " + svc + " — no coordinated handler on this host; reboot to apply (a naive restart would sever the D-Bus bus and lock out SSH)"
+			done[svc] = refusedRestartLine(svc)
 		case err == nil:
 			ok(svc)
 		case errors.Is(err, ErrConnectionLost):

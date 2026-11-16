@@ -31,6 +31,7 @@ import (
 	"patchdeck/api/internal/notify"
 	"patchdeck/api/internal/ratelimit"
 	"patchdeck/api/internal/rbac"
+	"patchdeck/api/internal/restartpolicy"
 	"patchdeck/api/internal/scheduler"
 	"patchdeck/api/internal/sshx"
 	"patchdeck/api/internal/tasks"
@@ -1452,7 +1453,7 @@ func (a *app) notifyIfNewUpdates(r *tasks.Run, host models.Host, prevPkgs []mode
 	a.notifyHost(r, host.ID, "updates_available", fmt.Sprintf("Patchdeck: updates available on %s (%d packages)", host.Name, len(curr)), func(d *notify.Digest) {
 		d.Pending = append(d.Pending, notify.PendingHost{
 			Name: host.Name, Packages: len(curr), Security: models.SecurityCount(curr),
-			New: true, Reboot: res.NeedsReboot, Restarts: len(res.NeedsRestart),
+			New: true, Reboot: res.NeedsReboot, Restarts: restartpolicy.CountLive(res.NeedsRestart),
 		})
 	})
 }

@@ -14,6 +14,7 @@ import (
 	"patchdeck/api/internal/auth"
 	"patchdeck/api/internal/db"
 	"patchdeck/api/internal/models"
+	"patchdeck/api/internal/restartpolicy"
 )
 
 // --- The server-rendered UI (Go html/template + HTMX + SSE), served at the root. It reuses
@@ -73,6 +74,9 @@ type nextHostView struct {
 	RestartServices []string
 	RebootServices  []string
 	RebootAny       bool
+	// AtRebootServices: flagged units Patchdeck never restarts live (restartpolicy.IsNoLiveRestart);
+	// they pick up the update at the next reboot and don't count toward RebootAny.
+	AtRebootServices []string
 	// RestartOnly is true when the host has restartable units to clear but does NOT need a reboot.
 	// A host that needs a reboot (RebootAny) is presented as reboot-only — a reboot clears the
 	// restarts too, so we don't also offer/count it for a restart. This is what "Restart all" targets.
@@ -107,8 +111,12 @@ func fillFromSnapshot(v *nextHostView, s models.ScanSnapshot) {
 	}
 	v.NeedsReboot = s.NeedsReboot
 	v.RebootReason = s.RebootReason
-	v.RestartCount = len(s.NeedsRestart)
-	v.RestartServices, v.RebootServices = resolveRestartBuckets(s)
+	// Units that must not be restarted live just clear at the next reboot: listed quietly on the
+	// host page (AtRebootServices), they don't count as a restart or make the host need a reboot.
+	v.RestartCount = restartpolicy.CountLive(s.NeedsRestart)
+	var rebootOnly []string
+	v.RestartServices, rebootOnly = resolveRestartBuckets(s)
+	v.RebootServices, v.AtRebootServices = restartpolicy.SplitAtReboot(rebootOnly)
 	v.RebootAny = s.NeedsReboot || len(v.RebootServices) > 0
 	v.RestartOnly = !v.RebootAny && len(v.RestartServices) > 0
 	v.DeferredCount = len(s.DeferredPackages)

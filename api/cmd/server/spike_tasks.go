@@ -17,6 +17,7 @@ import (
 	"patchdeck/api/internal/db"
 	"patchdeck/api/internal/models"
 	"patchdeck/api/internal/notify"
+	"patchdeck/api/internal/restartpolicy"
 	"patchdeck/api/internal/sshx"
 	"patchdeck/api/internal/tasks"
 )
@@ -243,7 +244,9 @@ func (a *app) stepRestart(ctx context.Context, r *tasks.Run) tasks.Result {
 		}
 	}
 	for _, svc := range res.RebootRequired {
-		r.Line("", "• "+svc+" still needs a reboot to fully apply")
+		if !restartpolicy.IsNoLiveRestart(svc) { // the result line above already says it waits for the reboot
+			r.Line("", "• "+svc+" still needs a reboot to fully apply")
+		}
 	}
 	kind := "restart_ok"
 	if len(res.Failed) > 0 {

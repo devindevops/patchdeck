@@ -86,3 +86,44 @@ func TestClassifyDbusWithHandlerIsRestartable(t *testing.T) {
 		t.Errorf("dbus with handler should be restartable, got %v", restartable)
 	}
 }
+
+func TestNoLiveRestart(t *testing.T) {
+	for _, s := range []string{
+		"unattended-upgrades.service", "unattended-upgrades", "apt-daily-upgrade.service", "apt-daily.service",
+		"rc-local.service", "cloud-final.service", "cron-daily.service", "user@1000.service", "user@0.service",
+		"gdm.service", "gdm3.service", "lightdm.service", "sddm.service", "xrdp.service", "rescue.service",
+		"Unattended-Upgrades.Service",
+	} {
+		if !IsNoLiveRestart(s) {
+			t.Errorf("%s should be no-live-restart", s)
+		}
+	}
+	// Daemons Patchdeck restarts on purpose (or plain services) must stay restartable.
+	for _, s := range []string{
+		"cron.service", "docker.service", "systemd-networkd.service", "getty@tty1.service", "nginx.service",
+		"user@.service", "user@abc.service", "user-runtime-dir@1000.service", "apt-cacher-ng.service", "dbus.service",
+	} {
+		if IsNoLiveRestart(s) {
+			t.Errorf("%s should NOT be no-live-restart", s)
+		}
+	}
+	// nova 2026-11-13: after a glibc update these were flagged together. unattended-upgrades must be
+	// left for the reboot, and must not make the host "need a reboot".
+	needs := []string{"docker.service", "getty@tty1.service", "unattended-upgrades.service"}
+	restartable, rebootOnly := Classify(needs, nil, nil)
+	if !reflect.DeepEqual(restartable, []string{"docker.service", "getty@tty1.service"}) {
+		t.Errorf("restartable=%v", restartable)
+	}
+	loud, quiet := SplitAtReboot(rebootOnly)
+	if len(loud) != 0 || !reflect.DeepEqual(quiet, []string{"unattended-upgrades.service"}) {
+		t.Errorf("loud=%v quiet=%v", loud, quiet)
+	}
+	if CountLive(needs) != 2 {
+		t.Errorf("CountLive=%d want 2", CountLive(needs))
+	}
+	// A host-provided needrestart handler is still the escape hatch.
+	r, rb := Classify([]string{"unattended-upgrades.service"}, map[string]bool{"unattended-upgrades.service": true}, nil)
+	if len(rb) != 0 || len(r) != 1 {
+		t.Errorf("with a handler it should be restartable: restart=%v reboot=%v", r, rb)
+	}
+}

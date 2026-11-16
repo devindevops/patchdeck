@@ -15,6 +15,7 @@ import (
 	"patchdeck/api/internal/db"
 	"patchdeck/api/internal/models"
 	"patchdeck/api/internal/notify"
+	"patchdeck/api/internal/restartpolicy"
 	"patchdeck/api/internal/sshx"
 )
 
@@ -566,7 +567,7 @@ func (e *Engine) notePending(n *runNotes, host models.Host, prev []models.Packag
 	e.note(n, host.ID, "updates_available", legacy, func(d *notify.Digest) {
 		d.Pending = append(d.Pending, notify.PendingHost{
 			Name: host.Name, Packages: len(res.Packages), Security: models.SecurityCount(res.Packages),
-			New: isNew, Reboot: res.NeedsReboot, Restarts: len(res.NeedsRestart),
+			New: isNew, Reboot: res.NeedsReboot, Restarts: restartpolicy.CountLive(res.NeedsRestart),
 		})
 	})
 }
