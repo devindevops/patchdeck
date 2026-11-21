@@ -29,6 +29,7 @@ var eventLabels = map[string]string{
 	"scan_ok": "Scan", "scan_fail": "Scan failed",
 	"apply_ok": "Apply", "apply_fail": "Apply failed", "apply_interrupted": "Apply interrupted",
 	"restart_ok": "Services restarted", "restart_fail": "Restart failed",
+	"service_fail": "Service stopped", "service_dismissed": "Stopped service dismissed",
 	"reboot_ok": "Reboot", "reboot_fail": "Reboot failed",
 	"shutdown_ok": "Shutdown", "shutdown_fail": "Shutdown failed",
 	"host_added": "Host added", "host_updated": "Host updated", "host_deleted": "Host deleted",

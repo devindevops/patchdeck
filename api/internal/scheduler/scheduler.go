@@ -628,6 +628,7 @@ func (e *Engine) runApply(j models.Job, host models.Host, n *runNotes) bool {
 		})
 		_ = db.RecordActivity(e.db, host.ID, host.Name, "apply_fail", fmt.Sprintf("Scheduled apply failed: %v", err))
 		log.Printf("scheduler: job=%s apply host=%s failed: %v", j.ID, host.Name, err)
+		e.noteStopped(j, host, n, res.StoppedServices, true)
 		return false
 	}
 	e.note(n, host.ID, "auto_apply_success", fmt.Sprintf("Patchdeck scheduled apply success: %s (%d package changes)", host.Name, res.ChangedPackages), func(d *notify.Digest) {
@@ -635,7 +636,28 @@ func (e *Engine) runApply(j models.Job, host models.Host, n *runNotes) bool {
 	})
 	_ = db.RecordActivity(e.db, host.ID, host.Name, "apply_ok", fmt.Sprintf("Scheduled apply completed: %d packages changed", res.ChangedPackages))
 	log.Printf("scheduler: job=%s apply complete host=%s changed=%d reboot=%v", j.ID, host.Name, res.ChangedPackages, res.NeedsReboot)
+	e.noteStopped(j, host, n, res.StoppedServices, false)
 	return true
+}
+
+// noteStopped handles services an apply left stopped (v2.13.5): kept on the card until they run
+// again, logged, and notified like a failed apply. Called after a successful AND a failed apply;
+// applyFailed: the failure was already pushed, so per-host delivery doesn't push a second message.
+func (e *Engine) noteStopped(j models.Job, host models.Host, n *runNotes, units []string, applyFailed bool) {
+	if len(units) == 0 {
+		return
+	}
+	msg := strings.Join(units, ", ") + " stopped after the update"
+	_ = db.AddStoppedUnits(e.db, host.ID, "apply", units)
+	_ = db.RecordActivity(e.db, host.ID, host.Name, "service_fail", msg)
+	push := "Patchdeck: " + host.Name + ": " + msg
+	if applyFailed {
+		push = ""
+	}
+	e.note(n, host.ID, "auto_apply_failure", push, func(d *notify.Digest) {
+		d.Failed = append(d.Failed, notify.FailedHost{Name: host.Name, Phase: "services", Err: msg})
+	})
+	log.Printf("scheduler: job=%s apply host=%s stopped services: %s", j.ID, host.Name, strings.Join(units, ", "))
 }
 
 func (e *Engine) runScanApply(j models.Job, host models.Host, n *runNotes) bool {

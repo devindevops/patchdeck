@@ -40,10 +40,12 @@ type AppliedHost struct {
 	Interrupted bool // the connection dropped mid-apply (restart/reboot); almost certainly applied
 }
 
-// FailedHost is a host whose scan or apply failed.
+// FailedHost is a host whose scan or apply failed, or (Phase "services") whose services stopped
+// after Patchdeck's apply or restart; then Err is the whole message ("nginx.service stopped after
+// the update").
 type FailedHost struct {
 	Name  string
-	Phase string // "scan" | "apply"
+	Phase string // "scan" | "apply" | "restart" | "reboot" | "services"
 	Err   string
 }
 
@@ -83,7 +85,26 @@ func (d Digest) Empty() bool {
 	return len(d.Pending)+len(d.Applied)+len(d.Failed)+d.UpToDate == 0
 }
 
-func (d Digest) total() int { return len(d.Pending) + len(d.Applied) + len(d.Failed) + d.UpToDate }
+// total counts the hosts in the digest. A "services" entry is about a host already counted as
+// updated or pending (its services stopped after the update), so it isn't counted again. (Names
+// aren't unique, so everything else is counted per entry.)
+func (d Digest) total() int {
+	listed := map[string]bool{}
+	for _, p := range d.Pending {
+		listed[p.Name] = true
+	}
+	for _, a := range d.Applied {
+		listed[a.Name] = true
+	}
+	n := len(d.Pending) + len(d.Applied) + d.UpToDate
+	for _, f := range d.Failed {
+		if f.Phase == "services" && listed[f.Name] {
+			continue
+		}
+		n++
+	}
+	return n
+}
 
 func plural(n int, one, many string) string {
 	if n == 1 {
@@ -145,8 +166,19 @@ func (d Digest) Summary() string {
 	if reboots > 0 {
 		parts = append(parts, plural(reboots, "needs a reboot", "need a reboot"))
 	}
-	if n := len(d.Failed); n > 0 {
-		parts = append(parts, fmt.Sprintf("%d failed", n))
+	fails, stops := 0, 0
+	for _, f := range d.Failed {
+		if f.Phase == "services" {
+			stops++
+		} else {
+			fails++
+		}
+	}
+	if fails > 0 {
+		parts = append(parts, fmt.Sprintf("%d failed", fails))
+	}
+	if stops > 0 {
+		parts = append(parts, plural(stops, "host has stopped services", "hosts have stopped services"))
 	}
 	if len(parts) == 0 {
 		if d.Scheduled {
@@ -182,7 +214,9 @@ func (d Digest) Body() string {
 		lines = append(lines, "Failed:")
 		for _, h := range f {
 			line := fmt.Sprintf("- %s: %s failed", h.Name, h.Phase)
-			if e := shortErr(h.Err); e != "" {
+			if e := shortErr(h.Err); h.Phase == "services" {
+				line = fmt.Sprintf("- %s: %s", h.Name, e)
+			} else if e != "" {
 				line += " (" + e + ")"
 			}
 			lines = append(lines, line)

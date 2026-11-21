@@ -93,6 +93,8 @@
   </div>
   {{end}}
 
+  <div id="stoppedsec-{{.V.ID}}">{{template "stoppedsec" .V}}</div>
+
   {{if .V.AtRebootServices}}
   <div class="section-h">Clears at next reboot ({{len .V.AtRebootServices}})</div>
   <p class="formsub" style="margin:0 0 7px">Restarting these on a running host isn&rsquo;t safe (it re-runs a job, ends sessions or breaks a shutdown helper), so Patchdeck leaves them alone. They pick up the update at the next reboot &mdash; nothing to do now.</p>
