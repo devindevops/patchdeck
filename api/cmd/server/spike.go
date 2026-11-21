@@ -88,6 +88,30 @@ type nextHostView struct {
 	Busy bool
 	// Fits: the actions a card selection may run on this host (data-fits; actionFits decides).
 	Fits string
+	// Stopped: services Patchdeck saw stop after its own apply or restart (v2.13.5). They keep the
+	// host in "Needs attention" until a scan finds them running again or they're dismissed.
+	Stopped []models.StoppedUnit
+	// StoppedMsg: the result line under the host page's stopped-services section (retry/dismiss).
+	StoppedMsg string
+	StoppedErr bool // StoppedMsg reports a failure (shown red)
+	// Attn: the card is filed under "Needs attention" (one rule for the card, the filters and the
+	// summary — see needsAttention).
+	Attn bool
+}
+
+// needsAttention: anything actionable at rest — a key to approve, updates, a reboot, a restart,
+// or a service that stopped after Patchdeck's apply or restart.
+func needsAttention(v nextHostView) bool {
+	return v.PendingKey || v.Unverified || len(v.Stopped) > 0 ||
+		(v.HasScan && (v.UpdateCount > 0 || v.NeedsReboot || v.RestartCount > 0))
+}
+
+// finishView fills the fields derived from everything else (call it last).
+func (a *app) finishView(v *nextHostView) {
+	v.State = deriveState(*v)
+	v.Attn = needsAttention(*v)
+	v.Busy = a.hostBusy(v.ID)
+	v.Fits = fitsList(*v)
 }
 
 // resolveRestartBuckets splits a snapshot's needs-restart list into the restartable bucket and
@@ -154,7 +178,7 @@ func deriveState(v nextHostView) string {
 		return "unverified" // approval-required host, first connection not approved yet
 	case !v.HasScan:
 		return "noscan"
-	case v.NeedsReboot || v.RestartCount > 0:
+	case v.NeedsReboot || v.RestartCount > 0 || len(v.Stopped) > 0:
 		return "attention"
 	case v.UpdateCount > 0:
 		return "updates"
@@ -193,6 +217,7 @@ func (a *app) nextHostViews() ([]nextHostView, error) {
 	for _, s := range snaps {
 		byID[s.HostID] = s
 	}
+	stopped, _ := db.ListStoppedUnits(a.db)
 	out := make([]nextHostView, 0, len(hosts))
 	for _, h := range hosts {
 		v := nextHostView{ID: h.ID, Name: h.Name, Address: h.Address}
@@ -201,9 +226,8 @@ func (a *app) nextHostViews() ([]nextHostView, error) {
 			fillFromSnapshot(&v, s)
 			v.IsSelf = a.isSelfHost(s)
 		}
-		v.State = deriveState(v)
-		v.Busy = a.hostBusy(h.ID)
-		v.Fits = fitsList(v)
+		v.Stopped = stopped[h.ID]
+		a.finishView(&v)
 		out = append(out, v)
 	}
 	return out, nil
@@ -241,9 +265,10 @@ func (a *app) nextHostView(id string) (nextHostView, models.ScanSnapshot, error)
 			break
 		}
 	}
-	v.State = deriveState(v)
-	v.Busy = a.hostBusy(h.ID)
-	v.Fits = fitsList(v)
+	if stopped, err := db.ListStoppedUnits(a.db); err == nil {
+		v.Stopped = stopped[h.ID]
+	}
+	a.finishView(&v)
 	return v, snap, nil
 }
 
@@ -381,7 +406,7 @@ func buildSummary(views []nextHostView) (nextSummary, []nextHostView, []nextHost
 			// fleet-wide action (they still show a restart chip and can be restarted individually).
 			s.RestartHosts++
 		}
-		if v.PendingKey || v.Unverified || (v.HasScan && (v.UpdateCount > 0 || v.NeedsReboot || v.RestartCount > 0)) {
+		if needsAttention(v) {
 			s.NeedAttention++
 			attention = append(attention, v)
 		} else {
@@ -430,6 +455,7 @@ func (a *app) nextDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "host not found", http.StatusNotFound)
 		return
 	}
+	v.StoppedMsg, v.StoppedErr = a.takeStoppedNote(id)
 	host, _ := db.GetHost(a.db, id)
 	prefs, _ := db.GetHostNotificationPrefs(a.db, id)
 	a.renderNext(w, "detail.html", map[string]any{"V": v, "Snap": snap, "Host": host, "Prefs": prefs})

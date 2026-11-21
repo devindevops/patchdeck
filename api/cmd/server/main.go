@@ -66,6 +66,10 @@ type app struct {
 	// taskDigests: each running multi-host task's own digest, sent when it finishes (v2.12.0).
 	taskDigestMu sync.Mutex
 	taskDigests  map[string]*notify.Digest
+	// stoppedNotes: the last Try again / Dismiss result per host, shown once under the host page's
+	// stopped-services section (the page may reload while the retry holds the host's lock).
+	stoppedNoteMu sync.Mutex
+	stoppedNotes  map[string]stoppedNote
 }
 
 const totpIssuer = "Patchdeck"
@@ -257,6 +261,8 @@ func main() {
 		nr.Get("/hosts/{id}/card", a.nextCard)
 		nr.Get("/hosts/{id}/dot", a.nextDot)
 		nr.Get("/hosts/{id}/connline", a.nextConnLine)
+		nr.Post("/hosts/{id}/stopped/retry", a.nextStoppedRetry)     // v2.13.5: a service that stopped after Patchdeck's apply/restart
+		nr.Post("/hosts/{id}/stopped/dismiss", a.nextStoppedDismiss) // (spike_stopped.go)
 		// Scan / apply / restart / reboot run as server-side tasks (spike_tasks.go, decision 0009).
 		nr.Post("/tasks", a.nextTaskStart)
 		nr.Get("/tasks/confirm", a.nextSelConfirm) // confirm for an action on the selected cards (v2.11)
@@ -940,11 +946,13 @@ func (a *app) applyUpdates(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = db.RecordActivity(a.db, host.ID, host.Name, "apply_fail", fmt.Sprintf("Apply failed: %v", err))
 		a.notifyApplyFailure(nil, host, err)
-		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		a.recordStopped(nil, host, "apply", res.StoppedServices, true)
+		writeJSON(w, 500, map[string]any{"error": err.Error(), "stopped_services": res.StoppedServices})
 		return
 	}
 	a.notifyApplied(nil, host, res)
 	_ = db.RecordActivity(a.db, host.ID, host.Name, "apply_ok", fmt.Sprintf("Applied updates: %d packages changed", res.ChangedPackages))
+	a.recordStopped(nil, host, "apply", res.StoppedServices, false)
 	writeJSON(w, 200, res)
 }
 

@@ -65,34 +65,40 @@ fi
 nohup setsid sh -c '
 echo $$ > "$0.pid"
 export LANG=C LC_ALL=C DEBIAN_FRONTEND=noninteractive
-
-case "$1" in
-	apt)
-		dpkg --configure -a
-		apt-get update || echo __APT_UPDATE_FAILED__
-		apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold dist-upgrade
-		;;
-
-	dnf)
-		dnf -y --refresh upgrade
-		;;
-
-	yum)
-		yum -y update
-		;;
-
-	*)
-		echo "Unsupported package manager: $1"
-		exit 1
-		;;
-esac
-
-RC=$?
-echo "$RC" > "$0.rc.tmp" && mv "$0.rc.tmp" "$0.rc"
-' "$L" "$PM" > "$L.log" 2>&1 < /dev/null &
-
-`, applyDir, id, packageManagerDetectShell) + applyFollowBody(1)
+dpkg --configure -a
+apt-get update || echo __APT_UPDATE_FAILED__
+S=$(%[3]s) && printf "%%s\n" "$S" | cut -d" " -f1 | sort -u > "$0.stopped0"
+apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold dist-upgrade
+R=$?
+if [ -f "$0.stopped0" ] && grep -q "^Setting up " "$0.log"; then
+  echo "%[5]s"
+  sleep %[4]d
+  S=$(%[3]s) && printf "%%s\n" "$S" | cut -d" " -f1 | sort -u > "$0.stopped1" && comm -13 "$0.stopped0" "$0.stopped1" > "$0.newstopped"
+fi
+echo $R > "$0.rc.tmp" && mv "$0.rc.tmp" "$0.rc"' "$L" > "$L.log" 2>&1 < /dev/null &
+`, applyDir, id, applyListStopped, StoppedCheckSecs(), applyCheckNote()) + applyFollowBody(1)
 }
+
+// applyListStopped is stoppedUnitsCmd's systemctl call, written for the inside of the apply's
+// single-quoted sh -c (no single quotes there). Its exit status decides whether the check runs:
+// if systemctl can't answer before the upgrade (no systemd, no bus), there's no check at all.
+const applyListStopped = `systemctl list-units --state=failed,auto-restart --plain --no-legend --no-pager 2>/dev/null`
+
+// applyCheckNote is the progress line the apply log shows while it waits (kept out of error snippets).
+func applyCheckNote() string {
+	return fmt.Sprintf("Checking that services are still running (%d s)...", StoppedCheckSecs())
+}
+
+// StoppedCheckSecs is the check delay in whole seconds, for messages.
+func StoppedCheckSecs() int { return int(stoppedCheckDelay.Seconds()) }
+
+// stoppedCheckDelay: how long after an apply or a restart Patchdeck waits before checking that
+// services still run. nova 2026-11-13: unattended-upgrades died 22 s after a restart that worked.
+// A var so tests can shorten it.
+var stoppedCheckDelay = 30 * time.Second
+
+// StoppedCheckDelay is stoppedCheckDelay for callers outside this package (the restart check).
+func StoppedCheckDelay() time.Duration { return stoppedCheckDelay }
 
 // applyFollowScript re-attaches to a running (or finished) upgrade, resuming at line `from`.
 func applyFollowScript(id string, from int) string {
@@ -112,22 +118,10 @@ if [ -n "$P" ]; then tail -n +%d --pid="$P" -f "$L.log"; else tail -n +%d "$L.lo
 i=0; while [ ! -f "$L.rc" ] && [ $i -lt 8 ]; do sleep 0.25; i=$((i+1)); done
 if [ -f "$L.rc" ]; then
   echo "__PD_APPLY_RC__=$(cat "$L.rc")"
-  echo "__PD_SETUP_COUNT__=$(grep -Ec '^(Setting up |Upgraded:|Installed:|Updated:)' "$L.log" || true)"
-
-	# Debian/Ubuntu reboot marker.
-	test -f /var/run/reboot-required && echo __REBOOT__ || true
-
-	# Debian-family kernel/microcode check.
-	command -v needrestart >/dev/null 2>&1 &&
-		needrestart -b 2>/dev/null |
-		grep -Eq '^NEEDRESTART-(KSTA: [23]|UCSTA: 2)' &&
-		echo __REBOOT__ || true
-
-	# RPM-family reboot check.
-	if command -v needs-restarting >/dev/null 2>&1; then
-		needs-restarting -r >/dev/null 2>&1
-		[ "$?" -eq 1 ] && echo __REBOOT__
-	fi
+  echo "__PD_SETUP_COUNT__=$(grep -c '^Setting up ' "$L.log")"
+  test -s "$L.newstopped" && echo "__PD_NEWSTOPPED__=$(tr '\n' ' ' < "$L.newstopped")" || true
+  test -f /var/run/reboot-required && echo __REBOOT__ || true
+  command -v needrestart >/dev/null 2>&1 && needrestart -b 2>/dev/null | grep -Eq '^NEEDRESTART-(KSTA: [23]|UCSTA: 2)' && echo __REBOOT__ || true
 else echo __PD_APPLY_LOST__; fi
 `, from, from)
 }
@@ -139,6 +133,8 @@ var ErrApplyNotStarted = errors.New("the upgrade never started on the host")
 var (
 	applyRCRe    = regexp.MustCompile(`(?m)^__PD_APPLY_RC__=(\d+)\s*$`)
 	applySetupRe = regexp.MustCompile(`(?m)^__PD_SETUP_COUNT__=(\d+)\s*$`)
+	// applyStoppedRe: units that were running before the apply and stopped after it.
+	applyStoppedRe = regexp.MustCompile(`(?m)^__PD_NEWSTOPPED__=(.*)$`)
 )
 
 // retryableApplyErr: the follow session itself broke (connection lost, exec timeout, can't
@@ -301,8 +297,11 @@ func finishApply(out, log string) (models.ApplyResult, error) {
 		changed, _ = strconv.Atoi(m[1])
 	}
 	res := models.ApplyResult{ChangedPackages: changed, RawOutput: log, NeedsReboot: strings.Contains(out, "__REBOOT__")}
+	if m := applyStoppedRe.FindStringSubmatch(out); m != nil {
+		res.StoppedServices = OnlyServices(strings.Fields(m[1]))
+	}
 	if rc != 0 {
-		snippet := lastLines(log, 3)
+		snippet := lastLines(strings.ReplaceAll(log, applyCheckNote()+"\n", ""), 3)
 		if snippet == "" {
 			snippet = "no output"
 		}

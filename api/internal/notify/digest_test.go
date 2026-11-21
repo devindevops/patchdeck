@@ -204,3 +204,29 @@ func TestSendDigestUsesSummaryAsTitle(t *testing.T) {
 		t.Errorf("webhook title %q", got["title"])
 	}
 }
+
+// v2.13.5: a service that stopped after Patchdeck's apply reads as what happened, and the host is
+// counted once even though it's both updated and listed under Failed.
+func TestDigestStoppedServices(t *testing.T) {
+	d := Digest{Scheduled: true}
+	d.AddApplied(AppliedHost{Name: "nova", Changed: 10})
+	d.Failed = append(d.Failed, FailedHost{Name: "nova", Phase: "services", Err: "unattended-upgrades.service stopped after the update"},
+		FailedHost{Name: "orbit", Phase: "apply", Err: "exit 100"})
+	if got := d.total(); got != 2 {
+		t.Errorf("total=%d, want 2 (nova once)", got)
+	}
+	if got, want := d.Summary(), "updated nova (10 packages) · 1 failed · 1 host has stopped services"; !strings.HasSuffix(got, want[1:]) {
+		t.Errorf("summary %q, want %q", got, want)
+	}
+	if b := d.Body(); !strings.Contains(b, "- nova: unattended-upgrades.service stopped after the update\n") || !strings.Contains(b, "- orbit: apply failed (exit 100)") {
+		t.Errorf("body:\n%s", b)
+	}
+}
+
+// Two hosts that share a name are still two hosts.
+func TestDigestTotalWithDuplicateNames(t *testing.T) {
+	d := Digest{Scheduled: true, Pending: []PendingHost{{Name: "ubuntu", Packages: 1}, {Name: "ubuntu", Packages: 2}}}
+	if got := d.total(); got != 2 {
+		t.Errorf("total=%d, want 2", got)
+	}
+}
