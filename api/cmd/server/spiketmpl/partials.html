@@ -396,13 +396,27 @@
 </div>{{end}}
 
 
+{{/* stoppedsec — host page: services Patchdeck saw stop after its own apply or restart (v2.13.5).
+     Each clears on its own when a scan finds it running again; Try again restarts it and checks
+     30 s later; Dismiss forgets it. */}}
+{{define "stoppedsec"}}{{if .Stopped}}
+  <div class="section-h">Stopped services ({{len .Stopped}})</div>
+  <p class="formsub" style="margin:0 0 7px">These weren&rsquo;t failed before Patchdeck updated or restarted something on this host, and have stopped since. Each one clears on its own once a scan finds it running again.</p>
+  {{range .Stopped}}<div class="actionrow" style="align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 8px">
+    <span class="pill crit">{{.Unit}}</span>
+    <span class="muted">after {{if eq .Cause "restart"}}a restart{{else}}an update{{end}} &middot; {{.Since.Local.Format "Jan 2 15:04"}}</span>
+    <button class="btn ghost" hx-post="/hosts/{{$.ID}}/stopped/retry?unit={{urlquery .Unit}}" hx-target="#stoppedsec-{{$.ID}}" hx-swap="innerHTML" hx-disabled-elt="this" onclick="this.textContent='Restarting… then checking it stays up'">Try restart again</button>
+    <button class="btn ghost" hx-post="/hosts/{{$.ID}}/stopped/dismiss?unit={{urlquery .Unit}}" hx-target="#stoppedsec-{{$.ID}}" hx-swap="innerHTML">Dismiss</button>
+  </div>{{end}}
+{{end}}{{if .StoppedMsg}}<div class="flash {{if .StoppedErr}}err{{else}}ok{{end}}" style="margin:0 0 12px">{{.StoppedMsg}}</div>{{end}}{{end}}
+
 {{define "signal"}}{{if not .HasScan}}<span class="muted">Never scanned</span>
-{{else if and (eq .UpdateCount 0) (not .RebootAny) (not .RestartOnly)}}<span class="calm-line">{{template "check"}} Up to date</span>
-{{else}}{{if gt .UpdateCount 0}}<span class="updates">{{.UpdateCount}} update{{if ne .UpdateCount 1}}s{{end}}</span>{{end}}{{if gt .SecurityCount 0}}<span class="sep">&middot;</span><span class="pill crit">{{.SecurityCount}} security</span>{{end}}{{if .RebootAny}}<span class="pill crit">{{template "reboot"}}Reboot needed</span>{{else if .RestartOnly}}<span class="pill warn">{{template "reboot"}}{{len .RestartServices}} restart{{if ne (len .RestartServices) 1}}s{{end}}</span>{{end}}{{if gt .DeferredCount 0}}<span class="pill muted">{{.DeferredCount}} deferred</span>{{end}}{{end}}{{end}}
+{{else if and (eq .UpdateCount 0) (not .RebootAny) (not .RestartOnly) (not .Stopped)}}<span class="calm-line">{{template "check"}} Up to date</span>
+{{else}}{{if .Stopped}}<span class="pill crit">{{len .Stopped}} service{{if ne (len .Stopped) 1}}s{{end}} stopped</span>{{end}}{{if gt .UpdateCount 0}}<span class="updates">{{.UpdateCount}} update{{if ne .UpdateCount 1}}s{{end}}</span>{{end}}{{if gt .SecurityCount 0}}<span class="sep">&middot;</span><span class="pill crit">{{.SecurityCount}} security</span>{{end}}{{if .RebootAny}}<span class="pill crit">{{template "reboot"}}Reboot needed</span>{{else if .RestartOnly}}<span class="pill warn">{{template "reboot"}}{{len .RestartServices}} restart{{if ne (len .RestartServices) 1}}s{{end}}</span>{{end}}{{if gt .DeferredCount 0}}<span class="pill muted">{{.DeferredCount}} deferred</span>{{end}}{{end}}{{end}}
 
 {{define "dot"}}<span id="dot-{{.HostID}}" class="dot {{if .Connected}}dot-up{{else}}dot-down{{end}}" title="{{if .Connected}}reachable{{else}}unreachable{{end}}" aria-label="{{if .Connected}}reachable{{else}}unreachable{{end}}"></span>{{end}}
 
-{{define "card"}}<article id="card-{{.ID}}" class="card {{if or .PendingKey .Unverified (and .HasScan (or (gt .UpdateCount 0) .NeedsReboot (gt .RestartCount 0)))}}attn{{else}}calm{{end}}" data-name="{{.Name}}" data-addr="{{.Address}}" data-tags="{{range .Tags}}{{.}} {{end}}" data-attn="{{if or .PendingKey .Unverified (and .HasScan (or (gt .UpdateCount 0) .NeedsReboot (gt .RestartCount 0)))}}1{{else}}0{{end}}" data-updates="{{if gt .UpdateCount 0}}1{{else}}0{{end}}" data-reboot="{{if .RebootAny}}1{{else}}0{{end}}" data-restart="{{if .RestartOnly}}1{{else}}0{{end}}" data-updcount="{{.UpdateCount}}" data-seccount="{{.SecurityCount}}"{{if .Busy}} data-busy="1"{{end}}{{if .IsSelf}} data-self="1"{{end}}{{if or .Unverified .PendingKey}} data-locked="1"{{end}} data-fits="{{.Fits}}">
+{{define "card"}}<article id="card-{{.ID}}" class="card {{if .Attn}}attn{{else}}calm{{end}}" data-name="{{.Name}}" data-addr="{{.Address}}" data-tags="{{range .Tags}}{{.}} {{end}}" data-attn="{{if .Attn}}1{{else}}0{{end}}" data-updates="{{if gt .UpdateCount 0}}1{{else}}0{{end}}" data-reboot="{{if .RebootAny}}1{{else}}0{{end}}" data-restart="{{if .RestartOnly}}1{{else}}0{{end}}" data-updcount="{{.UpdateCount}}" data-seccount="{{.SecurityCount}}"{{if .Busy}} data-busy="1"{{end}}{{if .IsSelf}} data-self="1"{{end}}{{if or .Unverified .PendingKey}} data-locked="1"{{end}} data-fits="{{.Fits}}">
   <div class="c-top">
     <span class="host">
       {{/* A card re-rendered into its busy form keeps the dot it already has (hx-preserve) instead of
