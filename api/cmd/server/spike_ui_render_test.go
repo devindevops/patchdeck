@@ -181,14 +181,22 @@ func TestPickSelection(t *testing.T) {
 	}
 	ids := []string{"rb", "prot", "self", "busy", "new", "ok"}
 	s := (&app{}).pickSelection(tasks.KindReboot, views, ids)
-	if got := s.names(); got != "rb, prot" {
-		t.Errorf("reboot takes %s, want rb,prot", got)
+	// A hand-picked host is rebooted even when no scan says it needs it (Roy, 2026-11-21).
+	if got := s.names(); got != "rb, prot, ok" {
+		t.Errorf("reboot takes %s, want rb, prot, ok", got)
 	}
 	if strings.Join(s.Protected, ",") != "prot" {
 		t.Errorf("protected = %v, want [prot]", s.Protected)
 	}
 	left := strings.Join(s.LeftOut, "; ")
-	for _, want := range []string{"self (Patchdeck's own host)", "busy (busy right now)", "new (awaiting key approval)", "ok (doesn't need a reboot)"} {
+	if strings.Contains(left, "ok (") {
+		t.Errorf("a selected host must not be left out for not needing a reboot: %q", left)
+	}
+	// "Reboot all" still only takes hosts that need it (and never protected or self).
+	if all := eligibleForAll(tasks.KindReboot, views); len(all) != 3 || all[0].Name != "rb" || all[1].Name != "busy" || all[2].Name != "notsel" {
+		t.Errorf("reboot all takes %v, want rb, busy, notsel", all)
+	}
+	for _, want := range []string{"self (Patchdeck's own host)", "busy (busy right now)", "new (awaiting key approval)"} {
 		if !strings.Contains(left, want) {
 			t.Errorf("left out %q missing %q", left, want)
 		}
@@ -205,10 +213,11 @@ func TestPickSelection(t *testing.T) {
 	}
 	// The card carries what fits it, so the select bar never re-derives the rules.
 	for v, want := range map[string]string{
-		fitsList(nextHostView{UpdateCount: 2}):                         "scan apply",
+		fitsList(nextHostView{UpdateCount: 2}):                         "scan apply reboot",
+		fitsList(nextHostView{}):                                       "scan reboot",
 		fitsList(nextHostView{RebootAny: true, IsSelf: true}):          "scan",
 		fitsList(nextHostView{RebootAny: true, ExcludeFromBulk: true}): "scan reboot",
-		fitsList(nextHostView{RestartOnly: true}):                      "scan restart",
+		fitsList(nextHostView{RestartOnly: true}):                      "scan restart reboot",
 		fitsList(nextHostView{PendingKey: true, UpdateCount: 1}):       "",
 	} {
 		if v != want {

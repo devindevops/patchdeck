@@ -359,6 +359,18 @@ func actionFits(kind string, v nextHostView) (bool, string) {
 	return false, "unknown action"
 }
 
+// selectionFits is actionFits for hosts the operator picked by hand. Picking a host for a reboot
+// is the intent, so a selection reboots it whether or not a scan says it needs one (Roy, 2026-11-21:
+// mira, orion and playpen were selected but left out as "doesn't need a reboot"). Patchdeck's own
+// host and hosts awaiting key approval stay out. Everything else follows actionFits (an apply with no
+// updates or a restart with nothing flagged has nothing to do). "… all" buttons keep actionFits.
+func selectionFits(kind string, v nextHostView) (bool, string) {
+	if kind == tasks.KindReboot && !v.Unverified && !v.PendingKey && !v.IsSelf {
+		return true, ""
+	}
+	return actionFits(kind, v)
+}
+
 // protectedFrom: a protected host ("Protect from Reboot all") is kept out of these actions when
 // they run fleet-wide, and flagged when the operator selects it on purpose.
 func protectedFrom(kind string, v nextHostView) bool {
@@ -370,7 +382,7 @@ func protectedFrom(kind string, v nextHostView) bool {
 func fitsList(v nextHostView) string {
 	var out []string
 	for _, k := range []string{tasks.KindScan, tasks.KindApply, tasks.KindRestart, tasks.KindReboot} {
-		if ok, _ := actionFits(k, v); ok {
+		if ok, _ := selectionFits(k, v); ok {
 			out = append(out, k)
 		}
 	}
@@ -427,7 +439,7 @@ func (a *app) pickSelection(kind string, views []nextHostView, ids []string) sel
 		if !want[v.ID] {
 			continue
 		}
-		ok, why := actionFits(kind, v)
+		ok, why := selectionFits(kind, v)
 		if ok && v.Busy {
 			ok, why = false, "busy right now"
 			s.Busy++
