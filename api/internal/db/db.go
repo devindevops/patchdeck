@@ -162,6 +162,11 @@ func Migrate(db *sql.DB) error {
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS restart_marks (host_id TEXT NOT NULL, service TEXT NOT NULL, boot_id TEXT NOT NULL, created_at DATETIME NOT NULL, PRIMARY KEY(host_id, service))`); err != nil {
 		return err
 	}
+	// stopped_units: services Patchdeck saw stop after its own apply or restart (v2.13.5). Shown on
+	// the card until a scan finds the unit running again, or the operator dismisses it.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS stopped_units (host_id TEXT NOT NULL, unit TEXT NOT NULL, cause TEXT NOT NULL, since DATETIME NOT NULL, PRIMARY KEY(host_id, unit))`); err != nil {
+		return err
+	}
 	// tasks / task_hosts: server-side host actions (internal/tasks, decision 0009). A task is one
 	// action on one or more hosts; task_hosts tracks each host's progress so a Patchdeck restart can
 	// resume what's still running on a host (ref = e.g. the detached apply's id) and report the rest.
@@ -434,7 +439,80 @@ func DeleteHost(db *sql.DB, id string) error {
 	if _, err := tx.Exec(`DELETE FROM restart_marks WHERE host_id=?`, id); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(`DELETE FROM stopped_units WHERE host_id=?`, id); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+// AddStoppedUnits records services that stopped after Patchdeck's own apply or restart. A unit
+// already recorded takes the latest cause and time (it stopped again), which also restarts its
+// clear grace (StoppedClearGrace).
+func AddStoppedUnits(db *sql.DB, hostID, cause string, units []string) error {
+	now := time.Now().UTC()
+	for _, u := range units {
+		if _, err := db.Exec(`INSERT INTO stopped_units(host_id,unit,cause,since) VALUES(?,?,?,?)
+			ON CONFLICT(host_id,unit) DO UPDATE SET cause=excluded.cause, since=excluded.since`, hostID, u, cause, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ListStoppedUnits returns every recorded stopped service, by host id.
+func ListStoppedUnits(db *sql.DB) (map[string][]models.StoppedUnit, error) {
+	rows, err := db.Query(`SELECT host_id, unit, cause, since FROM stopped_units ORDER BY since, unit`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]models.StoppedUnit{}
+	for rows.Next() {
+		var hostID string
+		var u models.StoppedUnit
+		if err := rows.Scan(&hostID, &u.Unit, &u.Cause, &u.Since); err != nil {
+			return nil, err
+		}
+		out[hostID] = append(out[hostID], u)
+	}
+	return out, rows.Err()
+}
+
+// DeleteStoppedUnit forgets one stopped service (the operator dismissed it, or it runs again).
+func DeleteStoppedUnit(db *sql.DB, hostID, unit string) error {
+	_, err := db.Exec(`DELETE FROM stopped_units WHERE host_id=? AND unit=?`, hostID, unit)
+	return err
+}
+
+// StoppedClearGrace: a stopped-service record is at least this old before a scan may clear it. A
+// crash-looping unit spends part of each cycle starting or briefly running, and the task rescans
+// right after recording it; without the grace that rescan could catch it mid-cycle and clear it.
+// A var so tests can change it.
+var StoppedClearGrace = 2 * time.Minute
+
+// reconcileStoppedUnits forgets the recorded stopped services that are no longer failed or
+// crash-looping on the host (fixed by hand, recovered on their own, or brought back by a reboot).
+func reconcileStoppedUnits(db *sql.DB, hostID string, stoppedNow []string) {
+	still := make(map[string]bool, len(stoppedNow))
+	for _, u := range stoppedNow {
+		still[u] = true
+	}
+	rows, err := db.Query(`SELECT unit, since FROM stopped_units WHERE host_id=?`, hostID)
+	if err != nil {
+		return
+	}
+	var gone []string
+	for rows.Next() {
+		var u string
+		var since time.Time
+		if rows.Scan(&u, &since) == nil && !still[u] && time.Since(since) >= StoppedClearGrace {
+			gone = append(gone, u)
+		}
+	}
+	rows.Close()
+	for _, u := range gone {
+		_ = DeleteStoppedUnit(db, hostID, u)
+	}
 }
 
 // reconcileJobsAfterHostDelete removes hostID from every host-targeted job's
@@ -528,6 +606,9 @@ func UpsertScanResult(db *sql.DB, hostID string, sr models.ScanResult) error {
 	// dropping off needrestart prunes them), then split needs-restart into "a smart restart can
 	// handle it" vs "needs a reboot" (learned-resistant, or the D-Bus bus with no handler).
 	resistant := reconcileRestartMarks(db, hostID, sr.NeedsRestart, sr.BootID)
+	if sr.StoppedKnown {
+		reconcileStoppedUnits(db, hostID, sr.StoppedUnits)
+	}
 	restartable, rebootOnly := restartpolicy.Classify(sr.NeedsRestart, sr.RestartHandlers, resistant)
 	restartJSON, _ := json.Marshal(restartable)
 	rebootJSON, _ := json.Marshal(rebootOnly)

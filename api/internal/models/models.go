@@ -109,6 +109,20 @@ type ScanResult struct {
 	// (/etc/needrestart/restart.d/<svc>) for that flagged service. Drives the restart-vs-reboot
 	// bucketing of the needs-restart list.
 	RestartHandlers map[string]bool `json:"-"`
+	// StoppedUnits: the host's units that are failed or crash-looping right now (systemctl
+	// list-units --state=failed,auto-restart). Used only to clear stopped-service records that
+	// recovered; StoppedKnown is false when the scan couldn't tell (then nothing is cleared).
+	StoppedUnits []string `json:"-"`
+	StoppedKnown bool     `json:"-"`
+}
+
+// StoppedUnit is a service Patchdeck saw stop because of something it did: it was running before
+// an apply and failed after it, or it was restarted and failed within 30 s. It stays on the card
+// until a scan finds it running again or the operator dismisses it.
+type StoppedUnit struct {
+	Unit  string    `json:"unit"`
+	Cause string    `json:"cause"` // "apply" | "restart"
+	Since time.Time `json:"since"`
 }
 
 type ScanSnapshot struct {
@@ -137,6 +151,9 @@ type ApplyResult struct {
 	ChangedPackages int    `json:"changed_packages"`
 	RawOutput       string `json:"raw_output"`
 	NeedsReboot     bool   `json:"needs_reboot"`
+	// StoppedServices: units running before the apply that were failed (or crash-looping) 30 s
+	// after it. Units that were already failed beforehand are never listed.
+	StoppedServices []string `json:"stopped_services,omitempty"`
 }
 
 type RestartResult struct {

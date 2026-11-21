@@ -168,6 +168,14 @@ func parseScanOutput(raw string, hostID string) models.ScanResult {
 		cleanRaw = rest
 	}
 
+	// Failed / crash-looping units right now (clears stopped-service records that recovered).
+	var stoppedUnits []string
+	stoppedKnown := false
+	if content, rest := extractBlock(cleanRaw, "__STOPPED_START__", "__STOPPED_END__"); rest != cleanRaw {
+		stoppedUnits, stoppedKnown = OnlyServices(strings.Fields(content)), true
+		cleanRaw = rest
+	}
+
 	// Per-service needrestart-handler presence ("<svc>|0|1" lines).
 	restartHandlers := map[string]bool{}
 	if content, rest := extractBlock(cleanRaw, "__NRHANDLERS_START__", "__NRHANDLERS_END__"); rest != cleanRaw {
@@ -262,6 +270,8 @@ func parseScanOutput(raw string, hostID string) models.ScanResult {
 		Kernel:           kernel,
 		BootID:           bootID,
 		RestartHandlers:  restartHandlers,
+		StoppedUnits:     stoppedUnits,
+		StoppedKnown:     stoppedKnown,
 	}
 }
 
@@ -341,6 +351,34 @@ type secretBlob struct {
 	SudoPassword  string `json:"sudo_password"`
 }
 
+// stoppedUnitsCmd lists the units that are failed or crash-looping right now, one per line
+// (systemd's own state, no root needed). "Stopped" everywhere in Patchdeck means exactly this.
+// systemctl's own exit status is kept: a failed call (no bus, say) must never read as "nothing
+// is stopped".
+const stoppedUnitsCmd = `__pdst=$(systemctl list-units --state=failed,auto-restart --plain --no-legend --no-pager 2>/dev/null) || exit 3; printf '%s\n' "$__pdst" | cut -d' ' -f1 | sort -u`
+
+// StoppedUnits returns the host's failed or crash-looping services (see stoppedUnitsCmd).
+func (c *Client) StoppedUnits(host models.Host, seal *crypto.SealBox) ([]string, error) {
+	// sh -c: the login user's shell may not be POSIX (fish, csh), like escalationProbe.
+	out, err := c.run(context.Background(), host, seal, "sh -c "+shellSingleQuote(stoppedUnitsCmd))
+	if err != nil {
+		return nil, err
+	}
+	return OnlyServices(strings.Fields(out)), nil
+}
+
+// OnlyServices keeps the .service units. Patchdeck tracks services only: a failed mount or swap
+// can't be restarted from here, and their escaped names (\x2d) aren't valid service names.
+func OnlyServices(units []string) []string {
+	var out []string
+	for _, u := range units {
+		if strings.HasSuffix(u, ".service") {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
 // scanCmd gathers upgradable packages + sysinfo + reboot/needrestart state.
 // LANG=C/LC_ALL=C force stable English apt output so the parser is locale-proof.
 // `apt-get update 1>&2` sends update progress to STDERR (streamed for visibility but
@@ -354,6 +392,7 @@ test -f /var/run/reboot-required && echo __REBOOT__ || true
 test -f /var/run/reboot-required.pkgs && { echo "__REBOOT_PKGS_START__"; cat /var/run/reboot-required.pkgs 2>/dev/null; echo "__REBOOT_PKGS_END__"; } || true
 if command -v needrestart >/dev/null 2>&1; then NR=$(needrestart -b 2>/dev/null || true); echo "$NR"; echo "__NRHANDLERS_START__"; echo "$NR" | sed -n 's/^NEEDRESTART-SVC:[[:space:]]*//p' | while IFS= read -r nrsvc; do [ -n "$nrsvc" ] || continue; if [ -x "/etc/needrestart/restart.d/$nrsvc" ]; then echo "$nrsvc|1"; else echo "$nrsvc|0"; fi; done; echo "__NRHANDLERS_END__"; else echo __NEEDRESTART_MISSING__; fi
 echo "__BOOTID_START__"; cat /proc/sys/kernel/random/boot_id 2>/dev/null || true; echo "__BOOTID_END__"
+if command -v systemctl >/dev/null 2>&1 && __pdsu=$( ` + stoppedUnitsCmd + ` ); then echo "__STOPPED_START__"; printf '%s\n' "$__pdsu"; echo "__STOPPED_END__"; fi
 echo "__SYSINFO_START__"; cat /etc/os-release 2>/dev/null || true; echo "__SYSINFO_SEP__"; uptime -p 2>/dev/null || uptime 2>/dev/null || true; echo "__SYSINFO_SEP__"; uname -r 2>/dev/null || true; echo "__SYSINFO_END__"`
 
 func (c *Client) ScanHost(host models.Host, seal *crypto.SealBox) (models.ScanResult, error) {

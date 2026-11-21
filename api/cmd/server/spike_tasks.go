@@ -196,13 +196,21 @@ func (a *app) stepApply(ctx context.Context, r *tasks.Run) tasks.Result {
 			r.Line("err", "Apply failed: "+hostErrText(err))
 		}
 		a.notifyApplyFailure(r, host, err)
+		// A failed apply (some packages set up, one broke) is exactly when services stop.
+		a.noteStoppedAfterApply(r, host, res.StoppedServices, true)
 		return failed(hostErrText(err))
 	}
 	_ = db.RecordActivity(a.db, host.ID, host.Name, "apply_ok", fmt.Sprintf("Applied updates: %d packages changed", res.ChangedPackages))
 	a.notifyApplied(r, host, res)
 	msg := fmt.Sprintf("Applied — %d package(s) changed.", res.ChangedPackages)
 	r.Line("ok", msg)
+	if len(res.StoppedServices) > 0 {
+		a.noteStoppedAfterApply(r, host, res.StoppedServices, false)
+		msg += " " + stoppedMessage("apply", res.StoppedServices) + "."
+	}
 	a.rescan(ctx, host, r)
+	// The packages went in, so the apply counts as done (as in a scheduled run); the stopped
+	// services are flagged on their own (card, activity, notification).
 	return tasks.Result{Status: tasks.StOK, Summary: msg}
 }
 
@@ -232,15 +240,48 @@ func (a *app) stepRestart(ctx context.Context, r *tasks.Run) tasks.Result {
 		a.noteActionFailure(r, host, "restart", hkErr.Message)
 		return failed(hkErr.Message)
 	}
+	for _, l := range strings.Split(strings.TrimSpace(res.Output), "\n") {
+		if strings.TrimSpace(l) != "" {
+			r.Line("", l)
+		}
+	}
+	// A restart that "worked" can still die moments later (nova 2026-11-13: 22 s). Check again
+	// after 30 s; a unit that stopped is not marked, and stays on the card until it runs again.
+	var stoppedAgain []string
+	if len(res.Dispatched) > 0 {
+		r.Line("", fmt.Sprintf("Checking in %d s that the restarted services stay up…", sshx.StoppedCheckSecs()))
+		cancelled := false
+		select {
+		case <-ctx.Done():
+			// The restarts already ran on the host: skip only the check, still mark + log them below.
+			cancelled = true
+			r.Line("", "Stopped before the check; the restarts themselves went through.")
+		case <-time.After(sshx.StoppedCheckDelay()):
+		}
+		if cancelled {
+			// nothing to check
+		} else if now, err := a.sshClient.StoppedUnits(host, a.secrets); err != nil {
+			r.Line("", "Couldn't check the services afterwards: "+hostErrText(err))
+		} else if stoppedAgain = stoppedAmong(now, res.Dispatched); len(stoppedAgain) > 0 {
+			var kept []string
+			for _, svc := range res.Dispatched {
+				if len(stoppedAmong(stoppedAgain, []string{svc})) == 0 {
+					kept = append(kept, svc)
+				}
+			}
+			res.Dispatched = kept
+			for _, svc := range stoppedAgain {
+				r.Line("err", "✗ "+stoppedMessage("restart", []string{svc}))
+			}
+			a.recordStopped(r, host, "restart", stoppedAgain, false)
+		} else {
+			r.Line("ok", "All restarted services are still running.")
+		}
+	}
 	marked := 0
 	for _, svc := range res.Dispatched {
 		if e := db.SetRestartMark(a.db, host.ID, svc, snap.BootID); e == nil {
 			marked++
-		}
-	}
-	for _, l := range strings.Split(strings.TrimSpace(res.Output), "\n") {
-		if strings.TrimSpace(l) != "" {
-			r.Line("", l)
 		}
 	}
 	for _, svc := range res.RebootRequired {
@@ -249,14 +290,19 @@ func (a *app) stepRestart(ctx context.Context, r *tasks.Run) tasks.Result {
 		}
 	}
 	kind := "restart_ok"
-	if len(res.Failed) > 0 {
+	if len(res.Failed) > 0 || len(stoppedAgain) > 0 {
 		kind = "restart_fail"
 	}
 	_ = db.RecordActivity(a.db, host.ID, host.Name, kind,
-		fmt.Sprintf("Smart restart: %d dispatched (%d watched), %d failed, %d reboot-required", len(res.Dispatched), marked, len(res.Failed), len(res.RebootRequired)))
+		fmt.Sprintf("Smart restart: %d dispatched (%d watched), %d failed, %d stopped again, %d reboot-required", len(res.Dispatched), marked, len(res.Failed), len(stoppedAgain), len(res.RebootRequired)))
 	msg := fmt.Sprintf("Restarted %d service(s).", len(res.Dispatched))
 	if len(res.Failed) > 0 {
 		msg = fmt.Sprintf("Restarted %d service(s); %d could not be restarted.", len(res.Dispatched), len(res.Failed))
+	}
+	if len(stoppedAgain) > 0 {
+		msg += fmt.Sprintf(" %d stopped again: %s.", len(stoppedAgain), strings.Join(stoppedAgain, ", "))
+	}
+	if len(res.Failed) > 0 || len(stoppedAgain) > 0 {
 		r.Line("err", msg)
 	} else {
 		r.Line("ok", msg)
@@ -265,6 +311,8 @@ func (a *app) stepRestart(ctx context.Context, r *tasks.Run) tasks.Result {
 	a.rescan(ctx, host, r)
 	if len(res.Failed) > 0 {
 		a.noteActionFailure(r, host, "restart", strings.Join(res.Failed, ", ")+" could not be restarted")
+	}
+	if len(res.Failed) > 0 || len(stoppedAgain) > 0 {
 		return failed(msg)
 	}
 	return tasks.Result{Status: tasks.StOK, Summary: msg}

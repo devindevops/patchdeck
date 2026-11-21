@@ -286,3 +286,36 @@ func TestEligibleForAll(t *testing.T) {
 		}
 	}
 }
+
+// v2.13.5: a stopped service puts the card in "Needs attention" with a red pill, even when the
+// host is otherwise up to date; the host page lists it with Try again / Dismiss.
+func TestStoppedServicesOnCardAndPage(t *testing.T) {
+	v := nextHostView{ID: "h1", Name: "nova", HasScan: true, Stopped: []models.StoppedUnit{{Unit: "nginx.service", Cause: "apply"}}}
+	if !needsAttention(v) || deriveState(v) != "attention" {
+		t.Fatal("a stopped service needs attention")
+	}
+	v.Attn = needsAttention(v)
+	card := exec(t, "card", v)
+	mustContain(t, "card", card, `data-attn="1"`)
+	mustContain(t, "card", card, "1 service stopped")
+	if strings.Contains(card, "Up to date") {
+		t.Error("a host with a stopped service is not 'Up to date'")
+	}
+	sec := exec(t, "stoppedsec", v)
+	mustContain(t, "stoppedsec", sec, "nginx.service")
+	mustContain(t, "stoppedsec", sec, "after an update")
+	esc := v
+	esc.Stopped = []models.StoppedUnit{{Unit: "user@1000.service", Cause: "restart"}}
+	esc.StoppedMsg, esc.StoppedErr = "user@1000.service stopped again", true
+	escOut := exec(t, "stoppedsec", esc)
+	mustContain(t, "stoppedsec/escaped", escOut, "dismiss?unit=user%401000.service")
+	mustContain(t, "stoppedsec/err", escOut, `class="flash err"`)
+	mustContain(t, "stoppedsec", sec, `hx-post="/hosts/h1/stopped/retry?unit=nginx.service"`)
+	mustContain(t, "stoppedsec", sec, `hx-post="/hosts/h1/stopped/dismiss?unit=nginx.service"`)
+	if calm := exec(t, "card", nextHostView{ID: "h2", Name: "ok", HasScan: true}); !strings.Contains(calm, "Up to date") || strings.Contains(calm, "stopped") {
+		t.Error("a healthy card stays calm")
+	}
+	if got := stoppedAmong([]string{"a.service", "old.service"}, []string{"a.service", "b.service"}); len(got) != 1 || got[0] != "a.service" {
+		t.Errorf("stoppedAmong = %v", got)
+	}
+}

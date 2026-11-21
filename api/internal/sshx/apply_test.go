@@ -171,3 +171,73 @@ func TestApplyDetachedGivesUpAfterWindow(t *testing.T) {
 		t.Fatalf("want interrupted after the window, got %v", err)
 	}
 }
+
+// v2.13.5: the apply lists stopped units before and 30 s after (only when something was set up),
+// and reports only the NEW ones. Units already failed beforehand are never reported.
+func TestApplyReportsNewlyStoppedServices(t *testing.T) {
+	s := applyStartScript("20261121T120000Z-abcd1234")
+	for _, want := range []string{`> "$0.stopped0"`, `[ -f "$0.stopped0" ] && grep -q "^Setting up " "$0.log"`, "sleep 30", `> "$0.stopped1"`,
+		`comm -13 "$0.stopped0" "$0.stopped1" > "$0.newstopped"`, "--state=failed,auto-restart", `R=$?`, `echo $R > "$0.rc.tmp"`, "__PD_NEWSTOPPED__",
+		`S=$(systemctl list-units`, `printf "%s\n" "$S"`} {
+		if !strings.Contains(s, want) {
+			t.Errorf("start script lacks %q", want)
+		}
+	}
+	// The before-list is taken right before the upgrade (after the list refresh, to keep the window
+	// short); the rc is written only after the check.
+	if strings.Index(s, `"$0.stopped0"`) < strings.Index(s, "apt-get update") || strings.Index(s, `"$0.stopped0"`) > strings.Index(s, "dist-upgrade") ||
+		strings.Index(s, "comm -13") > strings.Index(s, `echo $R >`) {
+		t.Error("stopped0 must be taken right before dist-upgrade, and the rc written after the check")
+	}
+	// The single-quoted sh -c body must not contain a single quote of its own.
+	body := s[strings.Index(s, "sh -c '")+len("sh -c '"):]
+	body = body[:strings.Index(body, `' "$L"`)]
+	if strings.Contains(body, "'") {
+		t.Errorf("a single quote inside the sh -c body breaks the script:\n%s", body)
+	}
+
+	key := newSigner(t)
+	f := newFakeSSH(t, key)
+	f.handler = func(cmd, _ string) (string, uint32) {
+		if cmd == escalationProbe {
+			return "__PD_ROOT__\n", 0
+		}
+		return "Setting up libc6 (2.39)\nChecking that services are still running (30 s)...\n__PD_APPLY_RC__=0\n__PD_SETUP_COUNT__=1\n__PD_NEWSTOPPED__=mnt-data\\x2d1.mount nginx.service unattended-upgrades.service \n", 0
+	}
+	host, seal := appKeyHost(t, f, "")
+	res, err := testClient(key).applyDetached(context.Background(), host, seal, nil)
+	if err != nil || strings.Join(res.StoppedServices, ",") != "nginx.service,unattended-upgrades.service" {
+		t.Fatalf("only services are kept: res=%+v err=%v", res, err)
+	}
+
+	// A failed apply still reports what stopped, and the progress line stays out of the error.
+	res, err = finishApply("__PD_APPLY_RC__=100\n__PD_NEWSTOPPED__=nginx.service\n",
+		"Setting up a (2)\nE: Sub-process /usr/bin/dpkg returned an error code (1)\nChecking that services are still running (30 s)...\n")
+	if err == nil || strings.Contains(err.Error(), "Checking that services") || strings.Join(res.StoppedServices, ",") != "nginx.service" {
+		t.Fatalf("failed apply: res=%+v err=%v", res, err)
+	}
+}
+
+// A failed systemctl call must never read as "nothing is stopped".
+func TestStoppedUnitsCmdKeepsSystemctlFailure(t *testing.T) {
+	if !strings.Contains(stoppedUnitsCmd, "|| exit 3") || !strings.Contains(scanCmd, `__pdsu=$( `+stoppedUnitsCmd+` ); then echo "__STOPPED_START__"`) {
+		t.Fatalf("stoppedUnitsCmd/scanCmd must only report a list when systemctl succeeded:\n%s", stoppedUnitsCmd)
+	}
+}
+
+func TestScanParsesStoppedUnits(t *testing.T) {
+	raw := "__BOOTID_START__\nabc\n__BOOTID_END__\n__STOPPED_START__\nfoo.service\nbar.service\n__STOPPED_END__\n"
+	r := parseScanOutput(raw, "h")
+	if !r.StoppedKnown || strings.Join(r.StoppedUnits, ",") != "foo.service,bar.service" {
+		t.Fatalf("stopped=%v known=%v", r.StoppedUnits, r.StoppedKnown)
+	}
+	if len(r.NeedsRestart) != 0 || len(r.Packages) != 0 {
+		t.Fatalf("stopped units leaked into packages/services: %+v %+v", r.Packages, r.NeedsRestart)
+	}
+	if r2 := parseScanOutput("__BOOTID_START__\nabc\n__BOOTID_END__\n", "h"); r2.StoppedKnown {
+		t.Fatal("no block = unknown (nothing gets cleared)")
+	}
+	if r3 := parseScanOutput("__STOPPED_START__\n__STOPPED_END__\n", "h"); !r3.StoppedKnown || len(r3.StoppedUnits) != 0 {
+		t.Fatal("an empty block = known, nothing stopped")
+	}
+}
