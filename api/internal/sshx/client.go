@@ -161,6 +161,18 @@ func parseScanOutput(raw string, hostID string) models.ScanResult {
 		return "", in
 	}
 
+	// Extract RPM package output separately so DNF/YUM messages cannot be
+	// mistaken for package records.
+	rpmBlock, rpmRest := extractBlock(
+		cleanRaw,
+		"__RPM_PACKAGES_START__",
+		"__RPM_PACKAGES_END__",
+	)
+
+	if rpmRest != cleanRaw {
+		cleanRaw = rpmRest
+	}
+
 	// Kernel boot_id (stable per boot; new UUID on every reboot).
 	var bootID string
 	if content, rest := extractBlock(cleanRaw, "__BOOTID_START__", "__BOOTID_END__"); rest != cleanRaw {
@@ -201,9 +213,16 @@ func parseScanOutput(raw string, hostID string) models.ScanResult {
 	lines := strings.Split(cleanRaw, "\n")
 	pkgs := []models.PackageInfo{}
 	deferredPkgs := []models.PackageInfo{}
+	// Parse RPM package-manager output.
+	for _, line := range strings.Split(rpmBlock, "\n") {
+		if pkg, ok := parseRPMLine(strings.TrimSpace(line)); ok {
+			pkgs = append(pkgs, pkg)
+		}
+	}
 	needsReboot := strings.Contains(cleanRaw, "__REBOOT__")
 	needrestartFound := !strings.Contains(cleanRaw, "__NEEDRESTART_MISSING__")
-	aptUpdateFailed := strings.Contains(cleanRaw, "__APT_UPDATE_FAILED__")
+	aptUpdateFailed := strings.Contains(cleanRaw, "__APT_UPDATE_FAILED__") ||
+		strings.Contains(cleanRaw, "__PKG_UPDATE_FAILED__")
 	services := []string{}
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -346,21 +365,110 @@ type secretBlob struct {
 // `apt-get update 1>&2` sends update progress to STDERR (streamed for visibility but
 // kept out of the STDOUT we parse), and its failure is reported via __APT_UPDATE_FAILED__
 // WITHOUT aborting the listing — a transient mirror hiccup no longer zeroes the scan.
-const scanCmd = `export LANG=C LC_ALL=C DEBIAN_FRONTEND=noninteractive
-if ! apt-get update 1>&2; then echo __APT_UPDATE_FAILED__; fi
-apt list --upgradable 2>/dev/null | tail -n +2
-echo "__DISTUPGRADE_SIM_START__"; apt-get -s dist-upgrade 2>/dev/null || true; echo "__DISTUPGRADE_SIM_END__"
-test -f /var/run/reboot-required && echo __REBOOT__ || true
-test -f /var/run/reboot-required.pkgs && { echo "__REBOOT_PKGS_START__"; cat /var/run/reboot-required.pkgs 2>/dev/null; echo "__REBOOT_PKGS_END__"; } || true
-if command -v needrestart >/dev/null 2>&1; then NR=$(needrestart -b 2>/dev/null || true); echo "$NR"; echo "__NRHANDLERS_START__"; echo "$NR" | sed -n 's/^NEEDRESTART-SVC:[[:space:]]*//p' | while IFS= read -r nrsvc; do [ -n "$nrsvc" ] || continue; if [ -x "/etc/needrestart/restart.d/$nrsvc" ]; then echo "$nrsvc|1"; else echo "$nrsvc|0"; fi; done; echo "__NRHANDLERS_END__"; else echo __NEEDRESTART_MISSING__; fi
-echo "__BOOTID_START__"; cat /proc/sys/kernel/random/boot_id 2>/dev/null || true; echo "__BOOTID_END__"
-echo "__SYSINFO_START__"; cat /etc/os-release 2>/dev/null || true; echo "__SYSINFO_SEP__"; uptime -p 2>/dev/null || uptime 2>/dev/null || true; echo "__SYSINFO_SEP__"; uname -r 2>/dev/null || true; echo "__SYSINFO_END__"`
+// const scanCmd = `export LANG=C LC_ALL=C DEBIAN_FRONTEND=noninteractive
+// if ! apt-get update 1>&2; then echo __APT_UPDATE_FAILED__; fi
+// apt list --upgradable 2>/dev/null | tail -n +2
+// echo "__DISTUPGRADE_SIM_START__"; apt-get -s dist-upgrade 2>/dev/null || true; echo "__DISTUPGRADE_SIM_END__"
+// test -f /var/run/reboot-required && echo __REBOOT__ || true
+// test -f /var/run/reboot-required.pkgs && { echo "__REBOOT_PKGS_START__"; cat /var/run/reboot-required.pkgs 2>/dev/null; echo "__REBOOT_PKGS_END__"; } || true
+// if command -v needrestart >/dev/null 2>&1; then NR=$(needrestart -b 2>/dev/null || true); echo "$NR"; echo "__NRHANDLERS_START__"; echo "$NR" | sed -n 's/^NEEDRESTART-SVC:[[:space:]]*//p' | while IFS= read -r nrsvc; do [ -n "$nrsvc" ] || continue; if [ -x "/etc/needrestart/restart.d/$nrsvc" ]; then echo "$nrsvc|1"; else echo "$nrsvc|0"; fi; done; echo "__NRHANDLERS_END__"; else echo __NEEDRESTART_MISSING__; fi
+// echo "__BOOTID_START__"; cat /proc/sys/kernel/random/boot_id 2>/dev/null || true; echo "__BOOTID_END__"
+// echo "__SYSINFO_START__"; cat /etc/os-release 2>/dev/null || true; echo "__SYSINFO_SEP__"; uptime -p 2>/dev/null || uptime 2>/dev/null || true; echo "__SYSINFO_SEP__"; uname -r 2>/dev/null || true; echo "__SYSINFO_END__"`
+
+func scanCommand() string {
+	return `export LANG=C LC_ALL=C DEBIAN_FRONTEND=noninteractive
+` + packageManagerDetectShell + `
+if [ -z "$PM" ]; then
+	echo __UNSUPPORTED_PACKAGE_MANAGER__
+else
+	echo "__PACKAGE_MANAGER__=$PM"
+
+	case "$PM" in
+		apt)
+			if ! apt-get update 1>&2; then
+				echo __APT_UPDATE_FAILED__
+			fi
+
+			apt list --upgradable 2>/dev/null | tail -n +2
+
+			echo "__DISTUPGRADE_SIM_START__"
+			apt-get -s dist-upgrade 2>/dev/null || true
+			echo "__DISTUPGRADE_SIM_END__"
+
+			test -f /var/run/reboot-required && echo __REBOOT__ || true
+			test -f /var/run/reboot-required.pkgs && {
+				echo "__REBOOT_PKGS_START__"
+				cat /var/run/reboot-required.pkgs 2>/dev/null
+				echo "__REBOOT_PKGS_END__"
+			} || true
+			;;
+
+		dnf|yum)
+			echo "__RPM_PACKAGES_START__"
+
+			"$PM" -q check-update 2>&1
+			RC=$?
+
+			# DNF/YUM return 100 when updates are available.
+			if [ "$RC" -ne 0 ] && [ "$RC" -ne 100 ]; then
+				echo __PKG_UPDATE_FAILED__
+			fi
+
+			echo "__RPM_PACKAGES_END__"
+
+			# RPM systems commonly provide this command through
+			# dnf-utils or yum-utils.
+			if command -v needs-restarting >/dev/null 2>&1; then
+				needs-restarting -r >/dev/null 2>&1
+				[ "$?" -eq 1 ] && echo __REBOOT__
+			fi
+			;;
+	esac
+fi
+
+if command -v needrestart >/dev/null 2>&1; then
+	NR=$(needrestart -b 2>/dev/null || true)
+	echo "$NR"
+	echo "__NRHANDLERS_START__"
+	echo "$NR" | sed -n 's/^NEEDRESTART-SVC:[[:space:]]*//p' | while IFS= read -r nrsvc; do
+		[ -n "$nrsvc" ] || continue
+		if [ -x "/etc/needrestart/restart.d/$nrsvc" ]; then
+			echo "$nrsvc|1"
+		else
+			echo "$nrsvc|0"
+		fi
+	done
+	echo "__NRHANDLERS_END__"
+else
+	echo __NEEDRESTART_MISSING__
+fi
+
+echo "__BOOTID_START__"
+cat /proc/sys/kernel/random/boot_id 2>/dev/null || true
+echo "__BOOTID_END__"
+
+echo "__SYSINFO_START__"
+cat /etc/os-release 2>/dev/null || true
+echo "__SYSINFO_SEP__"
+uptime -p 2>/dev/null || uptime 2>/dev/null || true
+echo "__SYSINFO_SEP__"
+uname -r 2>/dev/null || true
+echo "__SYSINFO_END__"
+`
+}
 
 func (c *Client) ScanHost(host models.Host, seal *crypto.SealBox) (models.ScanResult, error) {
-	raw, err := c.runPrivileged(context.Background(), host, seal, scanCmd)
+	raw, err := c.runPrivileged(context.Background(), host, seal, scanCommand())
 	if err != nil {
 		return models.ScanResult{}, err
 	}
+
+	if strings.Contains(raw, "__UNSUPPORTED_PACKAGE_MANAGER__") {
+		return models.ScanResult{}, errors.New(
+			"unsupported operating system: no supported package manager (apt, dnf or yum) was detected",
+		)
+	}
+
 	result := parseScanOutput(raw, host.ID)
 	return result, nil
 }
@@ -940,17 +1048,30 @@ func (c *Client) RestartDeferredDetached(host models.Host, seal *crypto.SealBox,
 }
 
 func (c *Client) Power(host models.Host, seal *crypto.SealBox, action string) error {
-	// Use systemctl for graceful systemd-managed reboot/shutdown.
-	// Wrap in nohup + setsid so the command survives SSH session teardown.
-	// We intentionally ignore the EOF error caused by the server closing the connection.
-	cmd := fmt.Sprintf("nohup setsid systemctl %s &>/dev/null & sleep 0.2", action)
+	var systemctlAction string
+
+	switch action {
+	case "reboot":
+		systemctlAction = "reboot"
+	case "shutdown":
+		systemctlAction = "poweroff"
+	default:
+		return fmt.Errorf("unsupported power action: %s", action)
+	}
+
+	// Run asynchronously so the command survives SSH session teardown.
+	// A dropped connection is expected when the host powers off.
+	cmd := fmt.Sprintf(
+		"nohup setsid systemctl %s >/dev/null 2>&1 </dev/null & sleep 0.2",
+		systemctlAction,
+	)
+
 	_, err := c.runPrivileged(context.Background(), host, seal, cmd)
-	// A dropped connection is expected (the host is going down), so that counts as initiated. But
-	// an error from BEFORE the command could run — host key, login, privilege escalation — means
-	// nothing was sent: report it, or a reboot would wait 15 minutes for a host that never went down.
+
 	if err != nil && powerNeverSent(err) {
 		return err
 	}
+
 	return nil
 }
 
@@ -1413,10 +1534,17 @@ func (c *Client) runPrivilegedStreaming(ctx context.Context, host models.Host, s
 
 // ScanHostStreaming runs a scan with streaming output via onLine callback.
 func (c *Client) ScanHostStreaming(ctx context.Context, host models.Host, seal *crypto.SealBox, onLine func(line string)) (models.ScanResult, error) {
-	raw, err := c.runPrivilegedStreaming(ctx, host, seal, scanCmd, onLine)
+	raw, err := c.runPrivilegedStreaming(ctx, host, seal, scanCommand(), onLine)
 	if err != nil {
 		return models.ScanResult{}, err
 	}
+
+	if strings.Contains(raw, "__UNSUPPORTED_PACKAGE_MANAGER__") {
+		return models.ScanResult{}, errors.New(
+			"unsupported operating system: no supported package manager (apt, dnf or yum) was detected",
+		)
+	}
+
 	result := parseScanOutput(raw, host.ID)
 	return result, nil
 }

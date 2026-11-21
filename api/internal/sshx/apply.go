@@ -54,13 +54,44 @@ func applyStartScript(id string) string {
 	return fmt.Sprintf(`D=%s; L="$D/apply-%s"
 mkdir -p "$D" && chmod 700 "$D"
 find "$D" -maxdepth 1 -name 'apply-*' -mtime +7 -exec rm -f {} + 2>/dev/null
-nohup setsid sh -c 'echo $$ > "$0.pid"
+
+%s
+
+if [ -z "$PM" ]; then
+	echo "__PD_UNSUPPORTED_PM__"
+	exit 1
+fi
+
+nohup setsid sh -c '
+echo $$ > "$0.pid"
 export LANG=C LC_ALL=C DEBIAN_FRONTEND=noninteractive
-dpkg --configure -a
-apt-get update || echo __APT_UPDATE_FAILED__
-apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold dist-upgrade
-echo $? > "$0.rc.tmp" && mv "$0.rc.tmp" "$0.rc"' "$L" > "$L.log" 2>&1 < /dev/null &
-`, applyDir, id) + applyFollowBody(1)
+
+case "$1" in
+	apt)
+		dpkg --configure -a
+		apt-get update || echo __APT_UPDATE_FAILED__
+		apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold dist-upgrade
+		;;
+
+	dnf)
+		dnf -y --refresh upgrade
+		;;
+
+	yum)
+		yum -y update
+		;;
+
+	*)
+		echo "Unsupported package manager: $1"
+		exit 1
+		;;
+esac
+
+RC=$?
+echo "$RC" > "$0.rc.tmp" && mv "$0.rc.tmp" "$0.rc"
+' "$L" "$PM" > "$L.log" 2>&1 < /dev/null &
+
+`, applyDir, id, packageManagerDetectShell) + applyFollowBody(1)
 }
 
 // applyFollowScript re-attaches to a running (or finished) upgrade, resuming at line `from`.
@@ -81,9 +112,22 @@ if [ -n "$P" ]; then tail -n +%d --pid="$P" -f "$L.log"; else tail -n +%d "$L.lo
 i=0; while [ ! -f "$L.rc" ] && [ $i -lt 8 ]; do sleep 0.25; i=$((i+1)); done
 if [ -f "$L.rc" ]; then
   echo "__PD_APPLY_RC__=$(cat "$L.rc")"
-  echo "__PD_SETUP_COUNT__=$(grep -c '^Setting up ' "$L.log")"
-  test -f /var/run/reboot-required && echo __REBOOT__ || true
-  command -v needrestart >/dev/null 2>&1 && needrestart -b 2>/dev/null | grep -Eq '^NEEDRESTART-(KSTA: [23]|UCSTA: 2)' && echo __REBOOT__ || true
+  echo "__PD_SETUP_COUNT__=$(grep -Ec '^(Setting up |Upgraded:|Installed:|Updated:)' "$L.log" || true)"
+
+	# Debian/Ubuntu reboot marker.
+	test -f /var/run/reboot-required && echo __REBOOT__ || true
+
+	# Debian-family kernel/microcode check.
+	command -v needrestart >/dev/null 2>&1 &&
+		needrestart -b 2>/dev/null |
+		grep -Eq '^NEEDRESTART-(KSTA: [23]|UCSTA: 2)' &&
+		echo __REBOOT__ || true
+
+	# RPM-family reboot check.
+	if command -v needs-restarting >/dev/null 2>&1; then
+		needs-restarting -r >/dev/null 2>&1
+		[ "$?" -eq 1 ] && echo __REBOOT__
+	fi
 else echo __PD_APPLY_LOST__; fi
 `, from, from)
 }
@@ -177,12 +221,16 @@ func (c *Client) followApply(ctx context.Context, host models.Host, seal *crypto
 			dropSince = time.Time{} // the link worked for a while: a fresh drop gets a fresh window
 		}
 		switch {
+		case strings.Contains(out, "__PD_UNSUPPORTED_PM__"):
+			return models.ApplyResult{}, errors.New(
+				"unsupported operating system: no supported package manager (apt, dnf or yum) was detected",
+			)
 		case applyRCRe.MatchString(out):
 			return finishApply(out, logBuf.String())
 		case strings.Contains(out, "__PD_APPLY_LOST__"):
 			return models.ApplyResult{}, &ApplyInterruptedError{
 				Underlying:   errors.New("the upgrade stopped on the host without an exit status (host rebooted or apt was killed)"),
-				ChangedSoFar: strings.Count(logBuf.String(), "Setting up "),
+				ChangedSoFar: countChangedPackages(logBuf.String()),
 				DpkgStarted:  true,
 			}
 		case strings.Contains(out, "__PD_APPLY_NOTFOUND__"):
@@ -214,7 +262,7 @@ func (c *Client) followApply(ctx context.Context, host models.Host, seal *crypto
 		if time.Since(dropSince) > applyReconnectWindow || time.Since(started) > applyMaxDuration {
 			return models.ApplyResult{}, &ApplyInterruptedError{
 				Underlying:   fmt.Errorf("couldn't reattach to the running upgrade: %w", err),
-				ChangedSoFar: strings.Count(logBuf.String(), "Setting up "),
+				ChangedSoFar: countChangedPackages(logBuf.String()),
 				DpkgStarted:  seen > 0,
 			}
 		}
@@ -225,6 +273,23 @@ func (c *Client) followApply(ctx context.Context, host models.Host, seal *crypto
 		}
 		script = applyFollowScript(id, seen+1)
 	}
+}
+
+func countChangedPackages(log string) int {
+	count := 0
+
+	for _, line := range strings.Split(log, "\n") {
+		line = strings.TrimSpace(line)
+
+		if strings.HasPrefix(line, "Setting up ") ||
+			strings.HasPrefix(line, "Upgraded:") ||
+			strings.HasPrefix(line, "Installed:") ||
+			strings.HasPrefix(line, "Updated:") {
+			count++
+		}
+	}
+
+	return count
 }
 
 // finishApply turns the follow's final output into the result: exit status, packages set up
@@ -241,7 +306,7 @@ func finishApply(out, log string) (models.ApplyResult, error) {
 		if snippet == "" {
 			snippet = "no output"
 		}
-		return res, fmt.Errorf("apt-get dist-upgrade failed (exit %d): %s", rc, snippet)
+		return res, fmt.Errorf("package upgrade failed (exit %d): %s", rc, snippet)
 	}
 	return res, nil
 }
