@@ -51,11 +51,11 @@ var applyIDRe = regexp.MustCompile(`^[0-9A-Za-z-]+$`)
 // conflicts (no prompt can hang or fail a non-interactive run). The exit status is written
 // atomically to <run>.rc when apt-get finishes.
 func applyStartScript(id string) string {
-	return fmt.Sprintf(`D=%s; L="$D/apply-%s"
+	return fmt.Sprintf(`D=%[1]s; L="$D/apply-%[2]s"
 mkdir -p "$D" && chmod 700 "$D"
 find "$D" -maxdepth 1 -name 'apply-*' -mtime +7 -exec rm -f {} + 2>/dev/null
 
-%s
+%[3]s
 
 if [ -z "$PM" ]; then
 	echo "__PD_UNSUPPORTED_PM__"
@@ -65,18 +65,35 @@ fi
 nohup setsid sh -c '
 echo $$ > "$0.pid"
 export LANG=C LC_ALL=C DEBIAN_FRONTEND=noninteractive
-dpkg --configure -a
-apt-get update || echo __APT_UPDATE_FAILED__
-S=$(%[3]s) && printf "%%s\n" "$S" | cut -d" " -f1 | sort -u > "$0.stopped0"
-apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold dist-upgrade
+
+case "$1" in
+	apt)
+		dpkg --configure -a
+		apt-get update || echo __APT_UPDATE_FAILED__
+		S=$(%[4]s) && printf "%%s\n" "$S" | cut -d" " -f1 | sort -u > "$0.stopped0"
+		apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold dist-upgrade
+		;;
+	dnf)
+		S=$(%[4]s) && printf "%%s\n" "$S" | cut -d" " -f1 | sort -u > "$0.stopped0"
+		dnf -y --refresh upgrade
+		;;
+	yum)
+		S=$(%[4]s) && printf "%%s\n" "$S" | cut -d" " -f1 | sort -u > "$0.stopped0"
+		yum -y update
+		;;
+	*)
+		echo "Unsupported package manager: $1"
+		exit 1
+		;;
+esac
 R=$?
-if [ -f "$0.stopped0" ] && grep -q "^Setting up " "$0.log"; then
-  echo "%[5]s"
-  sleep %[4]d
-  S=$(%[3]s) && printf "%%s\n" "$S" | cut -d" " -f1 | sort -u > "$0.stopped1" && comm -13 "$0.stopped0" "$0.stopped1" > "$0.newstopped"
+if [ -f "$0.stopped0" ] && grep -q "^Setting up " "$0.log" || [ -f "$0.stopped0" ] && grep -Eq "^(Upgraded:|Installed:|Updated:)" "$0.log"; then
+  echo "%[6]s"
+  sleep %[5]d
+  S=$(%[4]s) && printf "%%s\n" "$S" | cut -d" " -f1 | sort -u > "$0.stopped1" && comm -13 "$0.stopped0" "$0.stopped1" > "$0.newstopped"
 fi
-echo $R > "$0.rc.tmp" && mv "$0.rc.tmp" "$0.rc"' "$L" > "$L.log" 2>&1 < /dev/null &
-`, applyDir, id, applyListStopped, StoppedCheckSecs(), applyCheckNote()) + applyFollowBody(1)
+echo $R > "$0.rc.tmp" && mv "$0.rc.tmp" "$0.rc"' "$L" "$PM" > "$L.log" 2>&1 < /dev/null &
+`, applyDir, id, packageManagerDetectShell, applyListStopped, StoppedCheckSecs(), applyCheckNote()) + applyFollowBody(1)
 }
 
 // applyListStopped is stoppedUnitsCmd's systemctl call, written for the inside of the apply's
@@ -118,10 +135,14 @@ if [ -n "$P" ]; then tail -n +%d --pid="$P" -f "$L.log"; else tail -n +%d "$L.lo
 i=0; while [ ! -f "$L.rc" ] && [ $i -lt 8 ]; do sleep 0.25; i=$((i+1)); done
 if [ -f "$L.rc" ]; then
   echo "__PD_APPLY_RC__=$(cat "$L.rc")"
-  echo "__PD_SETUP_COUNT__=$(grep -c '^Setting up ' "$L.log")"
+  echo "__PD_SETUP_COUNT__=$(grep -Ec '^(Setting up |Upgraded:|Installed:|Updated:)' "$L.log" || true)"
   test -s "$L.newstopped" && echo "__PD_NEWSTOPPED__=$(tr '\n' ' ' < "$L.newstopped")" || true
   test -f /var/run/reboot-required && echo __REBOOT__ || true
   command -v needrestart >/dev/null 2>&1 && needrestart -b 2>/dev/null | grep -Eq '^NEEDRESTART-(KSTA: [23]|UCSTA: 2)' && echo __REBOOT__ || true
+  if command -v needs-restarting >/dev/null 2>&1; then
+    needs-restarting -r >/dev/null 2>&1
+    [ "$?" -eq 1 ] && echo __REBOOT__
+  fi
 else echo __PD_APPLY_LOST__; fi
 `, from, from)
 }
@@ -292,7 +313,7 @@ func countChangedPackages(log string) int {
 // (counted on the host over the whole log), reboot flag.
 func finishApply(out, log string) (models.ApplyResult, error) {
 	rc, _ := strconv.Atoi(applyRCRe.FindStringSubmatch(out)[1])
-	changed := strings.Count(log, "Setting up ")
+	changed := countChangedPackages(log)
 	if m := applySetupRe.FindStringSubmatch(out); m != nil {
 		changed, _ = strconv.Atoi(m[1])
 	}

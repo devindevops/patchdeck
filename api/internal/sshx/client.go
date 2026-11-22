@@ -398,21 +398,94 @@ func OnlyServices(units []string) []string {
 	return out
 }
 
-// scanCmd gathers upgradable packages + sysinfo + reboot/needrestart state.
-// LANG=C/LC_ALL=C force stable English apt output so the parser is locale-proof.
-// `apt-get update 1>&2` sends update progress to STDERR (streamed for visibility but
-// kept out of the STDOUT we parse), and its failure is reported via __APT_UPDATE_FAILED__
-// WITHOUT aborting the listing — a transient mirror hiccup no longer zeroes the scan.
-const scanCmd = `export LANG=C LC_ALL=C DEBIAN_FRONTEND=noninteractive
-if ! apt-get update 1>&2; then echo __APT_UPDATE_FAILED__; fi
-apt list --upgradable 2>/dev/null | tail -n +2
-echo "__DISTUPGRADE_SIM_START__"; apt-get -s dist-upgrade 2>/dev/null || true; echo "__DISTUPGRADE_SIM_END__"
-test -f /var/run/reboot-required && echo __REBOOT__ || true
-test -f /var/run/reboot-required.pkgs && { echo "__REBOOT_PKGS_START__"; cat /var/run/reboot-required.pkgs 2>/dev/null; echo "__REBOOT_PKGS_END__"; } || true
-if command -v needrestart >/dev/null 2>&1; then NR=$(needrestart -b 2>/dev/null || true); echo "$NR"; echo "__NRHANDLERS_START__"; echo "$NR" | sed -n 's/^NEEDRESTART-SVC:[[:space:]]*//p' | while IFS= read -r nrsvc; do [ -n "$nrsvc" ] || continue; if [ -x "/etc/needrestart/restart.d/$nrsvc" ]; then echo "$nrsvc|1"; else echo "$nrsvc|0"; fi; done; echo "__NRHANDLERS_END__"; else echo __NEEDRESTART_MISSING__; fi
-echo "__BOOTID_START__"; cat /proc/sys/kernel/random/boot_id 2>/dev/null || true; echo "__BOOTID_END__"
+// scanCommand gathers upgradable packages + sysinfo + reboot/needrestart state.
+// Supports both Debian-family (APT) and RPM-family (DNF, YUM) distributions.
+// LANG=C/LC_ALL=C force stable English output so parsers are locale-proof.
+func scanCommand() string {
+	return `export LANG=C LC_ALL=C DEBIAN_FRONTEND=noninteractive
+` + packageManagerDetectShell + `
+if [ -z "$PM" ]; then
+	echo __UNSUPPORTED_PACKAGE_MANAGER__
+else
+	echo "__PACKAGE_MANAGER__=$PM"
+
+	case "$PM" in
+		apt)
+			if ! apt-get update 1>&2; then
+				echo __APT_UPDATE_FAILED__
+			fi
+
+			apt list --upgradable 2>/dev/null | tail -n +2
+
+			echo "__DISTUPGRADE_SIM_START__"
+			apt-get -s dist-upgrade 2>/dev/null || true
+			echo "__DISTUPGRADE_SIM_END__"
+
+			test -f /var/run/reboot-required && echo __REBOOT__ || true
+			test -f /var/run/reboot-required.pkgs && {
+				echo "__REBOOT_PKGS_START__"
+				cat /var/run/reboot-required.pkgs 2>/dev/null
+				echo "__REBOOT_PKGS_END__"
+			} || true
+			;;
+
+		dnf|yum)
+			echo "__RPM_PACKAGES_START__"
+
+			"$PM" -q check-update 2>&1
+			RC=$?
+
+			# DNF/YUM return 100 when updates are available.
+			if [ "$RC" -ne 0 ] && [ "$RC" -ne 100 ]; then
+				echo __PKG_UPDATE_FAILED__
+			fi
+
+			echo "__RPM_PACKAGES_END__"
+
+			# RPM systems commonly provide this command through
+			# dnf-utils or yum-utils.
+			if command -v needs-restarting >/dev/null 2>&1; then
+				needs-restarting -r >/dev/null 2>&1
+				[ "$?" -eq 1 ] && echo __REBOOT__
+			fi
+			;;
+	esac
+fi
+
+if command -v needrestart >/dev/null 2>&1; then
+	NR=$(needrestart -b 2>/dev/null || true)
+	echo "$NR"
+	echo "__NRHANDLERS_START__"
+	echo "$NR" | sed -n 's/^NEEDRESTART-SVC:[[:space:]]*//p' | while IFS= read -r nrsvc; do
+		[ -n "$nrsvc" ] || continue
+		if [ -x "/etc/needrestart/restart.d/$nrsvc" ]; then
+			echo "$nrsvc|1"
+		else
+			echo "$nrsvc|0"
+		fi
+	done
+	echo "__NRHANDLERS_END__"
+else
+	echo __NEEDRESTART_MISSING__
+fi
+
+echo "__BOOTID_START__"
+cat /proc/sys/kernel/random/boot_id 2>/dev/null || true
+echo "__BOOTID_END__"
+
 if command -v systemctl >/dev/null 2>&1 && __pdsu=$( ` + stoppedUnitsCmd + ` ); then echo "__STOPPED_START__"; printf '%s\n' "$__pdsu"; echo "__STOPPED_END__"; fi
-echo "__SYSINFO_START__"; cat /etc/os-release 2>/dev/null || true; echo "__SYSINFO_SEP__"; uptime -p 2>/dev/null || uptime 2>/dev/null || true; echo "__SYSINFO_SEP__"; uname -r 2>/dev/null || true; echo "__SYSINFO_END__"`
+
+echo "__SYSINFO_START__"
+cat /etc/os-release 2>/dev/null || true
+echo "__SYSINFO_SEP__"
+uptime -p 2>/dev/null || uptime 2>/dev/null || true
+echo "__SYSINFO_SEP__"
+uname -r 2>/dev/null || true
+echo "__SYSINFO_END__"
+`
+}
+
+var scanCmd = scanCommand()
 
 func (c *Client) ScanHost(host models.Host, seal *crypto.SealBox) (models.ScanResult, error) {
 	raw, err := c.runPrivileged(context.Background(), host, seal, scanCommand())

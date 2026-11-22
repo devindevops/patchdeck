@@ -2606,7 +2606,12 @@ func (a *app) applyStream(w http.ResponseWriter, r *http.Request) {
 		} else if strings.HasPrefix(trimmedLine, "Unpacking ") {
 			unpackCount++
 			sseWrite(w, flusher, "progress", map[string]any{"phase": "unpacking", "percent": nil, "message": trimmedLine, "count": unpackCount})
-		} else if strings.HasPrefix(trimmedLine, "Setting up ") {
+		} else if strings.HasPrefix(trimmedLine, "Setting up ") ||
+			strings.HasPrefix(trimmedLine, "Upgraded:") ||
+			strings.HasPrefix(trimmedLine, "Installed:") ||
+			strings.HasPrefix(trimmedLine, "Updated:") ||
+			strings.HasPrefix(trimmedLine, "Upgrading   :") ||
+			strings.HasPrefix(trimmedLine, "Installing  :") {
 			setupCount++
 			total := unpackCount
 			if total == 0 {

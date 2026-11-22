@@ -67,7 +67,8 @@ func parseRPMLine(line string) (models.PackageInfo, bool) {
 	// Ignore headings, metadata messages and informational output.
 	if strings.HasSuffix(fields[0], ":") ||
 		strings.EqualFold(fields[0], "Obsoleting") ||
-		strings.EqualFold(fields[0], "Last") {
+		strings.EqualFold(fields[0], "Last") ||
+		strings.HasPrefix(fields[2], "@") {
 		return models.PackageInfo{}, false
 	}
 

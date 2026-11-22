@@ -3,6 +3,8 @@ package sshx
 import (
 	"strings"
 	"testing"
+
+	"patchdeck/api/internal/models"
 )
 
 func TestParseScanOutput_Packages(t *testing.T) {
@@ -157,5 +159,185 @@ Updated: systemd
 
 	if got := countChangedPackages(log); got != 5 {
 		t.Fatalf("countChangedPackages = %d, want 5", got)
+	}
+}
+
+func TestParseRPMLine(t *testing.T) {
+	tests := []struct {
+		name    string
+		line    string
+		wantPkg models.PackageInfo
+		wantOK  bool
+	}{
+		{
+			name: "standard package line",
+			line: "nginx.x86_64  1:1.24.0-1.el9  appstream",
+			wantPkg: models.PackageInfo{
+				Name:       "nginx",
+				Arch:       "x86_64",
+				NewVersion: "1:1.24.0-1.el9",
+				Source:     "appstream",
+			},
+			wantOK: true,
+		},
+		{
+			name: "noarch package",
+			line: "ca-certificates.noarch  2023.2.60_9.0.68-72.el7_9  updates",
+			wantPkg: models.PackageInfo{
+				Name:       "ca-certificates",
+				Arch:       "noarch",
+				NewVersion: "2023.2.60_9.0.68-72.el7_9",
+				Source:     "updates",
+			},
+			wantOK: true,
+		},
+		{
+			name: "package name with dot",
+			line: "python3.11.x86_64  3.11.5-1.el9_2.1  appstream",
+			wantPkg: models.PackageInfo{
+				Name:       "python3.11",
+				Arch:       "x86_64",
+				NewVersion: "3.11.5-1.el9_2.1",
+				Source:     "appstream",
+			},
+			wantOK: true,
+		},
+		{
+			name:   "installed obsoleted package with @ prefix",
+			line:   "    kernel.x86_64  5.14.0-362.18.1.el9_3  @baseos",
+			wantOK: false,
+		},
+		{
+			name:   "obsoleting packages header",
+			line:   "Obsoleting Packages",
+			wantOK: false,
+		},
+		{
+			name:   "last metadata check header",
+			line:   "Last metadata expiration check: 0:42:15 ago on Fri 21 Nov 2026 12:00:00 PM UTC.",
+			wantOK: false,
+		},
+		{
+			name:   "plugins loaded line",
+			line:   "Loaded plugins: fastestmirror, ovl",
+			wantOK: false,
+		},
+		{
+			name:   "security header",
+			line:   "Security: kernel-core-5.14.0-362.24.1.el9_3.x86_64 is an installed security update",
+			wantOK: false,
+		},
+		{
+			name:   "too few fields",
+			line:   "nginx.x86_64 1.2",
+			wantOK: false,
+		},
+		{
+			name:   "no arch extension",
+			line:   "Modular timer and other tasks",
+			wantOK: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotPkg, ok := parseRPMLine(tc.line)
+			if ok != tc.wantOK {
+				t.Fatalf("parseRPMLine(%q) ok = %v, want %v", tc.line, ok, tc.wantOK)
+			}
+			if ok && gotPkg != tc.wantPkg {
+				t.Fatalf("parseRPMLine(%q) = %+v, want %+v", tc.line, gotPkg, tc.wantPkg)
+			}
+		})
+	}
+}
+
+func TestParseScanOutput_RPMPackages(t *testing.T) {
+	raw := "__RPM_PACKAGES_START__\n" +
+		"Last metadata expiration check: 0:15:30 ago.\n" +
+		"nginx.x86_64  1:1.24.0-1.el9  appstream\n" +
+		"curl.x86_64   7.76.1-26.el9_3  baseos\n" +
+		"Obsoleting Packages\n" +
+		"kernel.x86_64  5.14.0-362.24.1.el9_3  baseos\n" +
+		"    kernel.x86_64  5.14.0-362.18.1.el9_3  @baseos\n" +
+		"__RPM_PACKAGES_END__\n" +
+		"__REBOOT__\n" +
+		"__BOOTID_START__\n" +
+		"12345678-1234-1234-1234-123456789abc\n" +
+		"__BOOTID_END__\n" +
+		"__SYSINFO_START__\n" +
+		"PRETTY_NAME=\"AlmaLinux 9.3 (Shamrock Pampas Cat)\"\n" +
+		"VERSION_ID=\"9.3\"\n" +
+		"ID=\"almalinux\"\n" +
+		"ID_LIKE=\"rhel centos fedora\"\n" +
+		"__SYSINFO_SEP__\n" +
+		"up 12 days, 3 hours\n" +
+		"__SYSINFO_SEP__\n" +
+		"5.14.0-362.18.1.el9_3.x86_64\n" +
+		"__SYSINFO_END__\n"
+
+	res := parseScanOutput(raw, "rpm-host-1")
+
+	if len(res.Packages) != 3 {
+		t.Fatalf("res.Packages length = %d, want 3 (%+v)", len(res.Packages), res.Packages)
+	}
+
+	wantNames := []string{"nginx", "curl", "kernel"}
+	for i, name := range wantNames {
+		if res.Packages[i].Name != name {
+			t.Errorf("pkg[%d].Name = %q, want %q", i, res.Packages[i].Name, name)
+		}
+	}
+
+	if !res.NeedsReboot {
+		t.Error("res.NeedsReboot should be true")
+	}
+	if res.OsName != "AlmaLinux 9.3 (Shamrock Pampas Cat)" {
+		t.Errorf("res.OsName = %q", res.OsName)
+	}
+	if res.OsVersion != "9.3" {
+		t.Errorf("res.OsVersion = %q", res.OsVersion)
+	}
+	if res.Uptime != "12 days, 3 hours" {
+		t.Errorf("res.Uptime = %q", res.Uptime)
+	}
+	if res.Kernel != "5.14.0-362.18.1.el9_3.x86_64" {
+		t.Errorf("res.Kernel = %q", res.Kernel)
+	}
+}
+
+func TestParseScanOutput_PkgUpdateFailed(t *testing.T) {
+	raw := "__PKG_UPDATE_FAILED__\n" +
+		"__RPM_PACKAGES_START__\n" +
+		"curl.x86_64 7.76.1-26.el9_3 baseos\n" +
+		"__RPM_PACKAGES_END__\n"
+
+	res := parseScanOutput(raw, "h")
+	if !res.AptUpdateFailed {
+		t.Fatal("AptUpdateFailed should be true when __PKG_UPDATE_FAILED__ is present")
+	}
+	if len(res.Packages) != 1 {
+		t.Fatalf("got %d packages, want 1", len(res.Packages))
+	}
+}
+
+func TestScanCommandSupportsRPM(t *testing.T) {
+	cmd := scanCommand()
+
+	for _, want := range []string{
+		"case \"$PM\" in",
+		"command -v dnf",
+		"command -v yum",
+		"command -v apt-get",
+		"__RPM_PACKAGES_START__",
+		"check-update",
+		"__PKG_UPDATE_FAILED__",
+		"needs-restarting -r",
+		"__UNSUPPORTED_PACKAGE_MANAGER__",
+		"__STOPPED_START__",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("scanCommand lacks %q", want)
+		}
 	}
 }
